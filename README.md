@@ -61,6 +61,9 @@ UUID as well. When the card mounts, Rambler:
 3. transcribes everything new with SRTs, syncs all connected drives, then flushes and unmounts the card and
    tells you it's safe to switch the recorder back.
 
+If your desktop doesn't mount drives until you open them (COSMIC, some minimal setups), Rambler mounts the
+card itself through udisks, the same way the file manager would, and leaves it alone once it has unmounted it.
+
 Any recorder or camera that shows up as a USB drive works the same way: add it with its label or UUID.
 
 ![Recorders](docs/recorders.png)

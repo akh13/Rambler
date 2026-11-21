@@ -238,3 +238,38 @@ def test_mountinfo_parsing():
     # label unreadable, but udisks named the folder after it
     ms2 = R.list_mounts(info, labels={}, uuids={}, use_findmnt=False)
     assert R.match(rec, ms2).target.name == "X8"
+
+
+def test_automount(monkeypatch):
+    from rambler import recorders as R
+    info_unmounted = "36 1 259:2 / / rw - ext4 /dev/nvme0n1p2 rw\n"
+    info_mounted = info_unmounted + "512 30 8:33 / /media/anna/X8 rw - fuseblk /dev/sdc1 rw\n"
+    labels = {"/dev/sdc1": "X8", "/dev/sdb1": "TOSHIBA EXT"}
+    rec = R.Recorder()
+    assert R.unmounted_devices(rec, info_unmounted, labels, {}) == ["/dev/sdc1"]
+    assert R.unmounted_devices(rec, info_mounted, labels, {}) == []
+    assert R.unmounted_devices(R.Recorder(label="", uuid="AB-12"), info_unmounted, {}, {"/dev/sdc1": "ab-12"}) == ["/dev/sdc1"]
+
+    calls = []
+    monkeypatch.setattr(R, "unmounted_devices", lambda r, *a: ["/dev/sdc1"])
+    monkeypatch.setattr(R.shutil, "which", lambda x: "/usr/bin/" + x)
+    monkeypatch.setattr(R.os.path, "exists", lambda p: True)
+
+    class Done:
+        returncode, stdout, stderr = 0, "Mounted /dev/sdc1 at /media/anna/X8", ""
+    monkeypatch.setattr(R.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
+    R._no_automount.clear()
+    from rambler.config import Config
+    cfg = Config()
+    assert R.automount(cfg, lambda m: None) == ["/dev/sdc1"]
+    assert calls[-1][:3] == ["udisksctl", "mount", "-b"]
+    assert R.automount(cfg, lambda m: None) == []          # only once per appearance
+    monkeypatch.setattr(R.os.path, "exists", lambda p: False)   # device went away...
+    monkeypatch.setattr(R, "unmounted_devices", lambda r, *a: [])
+    assert R.automount(cfg, lambda m: None) == []
+    monkeypatch.setattr(R.os.path, "exists", lambda p: True)    # ...and came back
+    monkeypatch.setattr(R, "unmounted_devices", lambda r, *a: ["/dev/sdc1"])
+    assert R.automount(cfg, lambda m: None) == ["/dev/sdc1"]
+    # after we unmount it ourselves, leave it alone while it's still plugged in
+    R.unmount(R.Mount(R.Path("/media/anna/X8"), "/dev/sdc1", "", "X8", "fuseblk"), lambda m: None)
+    assert R.automount(cfg, lambda m: None) == []

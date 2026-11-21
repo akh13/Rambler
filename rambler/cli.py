@@ -228,6 +228,10 @@ def cmd_recorders(cfg: Config, args) -> int:
         hit = next((r.name for r in R.recorders(cfg) if R.match(r, [m]) is m), None)
         print(f"  {m.target}  label={m.label or '-'}  uuid={m.uuid or '-'}  {m.fstype}  {m.source}"
               + (f"  -> {hit}" if hit else ""))
+    for r in R.recorders(cfg):
+        for dev in R.unmounted_devices(r):
+            print(f"  {dev}  label={r.label}  NOT MOUNTED -> {r.name}"
+                  + ("  (Rambler will mount it)" if r.auto_mount else "  (auto-mount is off)"))
     print("Configured recorders:")
     for r in R.recorders(cfg):
         m = R.match(r, mounts)
@@ -249,6 +253,7 @@ def cmd_watch(cfg: Config, args) -> int:
     try:
         while True:
             cfg = Config.load()
+            R.automount(cfg, print)
             mounts = R.list_mounts()
             present = set()
             for rec, m in R.connected(cfg, mounts):

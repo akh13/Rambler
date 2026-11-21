@@ -452,6 +452,8 @@ class MainWindow(QMainWindow):
             self._refresh_drive_bar()
 
     def _poll_recorders(self):
+        if not self.busy():
+            R.automount(self.cfg, self.log)   # desktops like COSMIC only mount when you open the drive
         conns = R.connected(self.cfg)
         self._recorders_now = conns
         seen = {r.name: m for r, m in conns}

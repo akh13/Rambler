@@ -41,6 +41,7 @@ class Recorder:
     keep_card_folders: bool = False  # recreate the card's subfolders under dest_subdir
     exclude: list[str] = field(default_factory=lambda: ["UTILITY/*", "SOUNDPAD/*"])
     auto_import: bool = True
+    auto_mount: bool = True         # mount the card ourselves if the desktop doesn't (e.g. COSMIC)
     unmount_after: bool = True
     enabled: bool = True
 
@@ -268,6 +269,64 @@ def import_recorder(cfg: Config, rec: Recorder, mount: Mount, log: Callable[[str
     return imported
 
 
+# Devices we've already tried to mount, or deliberately unmounted. They aren't mounted again until
+# they go away and come back (recorder switched out of card reader mode, or unplugged).
+_no_automount: set[str] = set()
+
+
+def _mounted_sources(mountinfo: str) -> set[str]:
+    out = set()
+    for line in mountinfo.splitlines():
+        post = line.partition(" - ")[2].split()
+        if len(post) >= 2 and post[1].startswith("/dev/"):
+            out.add(os.path.realpath(_unescape_mount(post[1])))
+    return out
+
+
+def unmounted_devices(rec: Recorder, mountinfo: str | None = None, labels: dict | None = None,
+                      uuids: dict | None = None) -> list[str]:
+    """Block devices that carry this recorder's label/UUID but aren't mounted anywhere."""
+    labels = _disk_links("by-label") if labels is None else labels
+    uuids = _disk_links("by-uuid") if uuids is None else uuids
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text()
+        except OSError:
+            return []
+    mounted = _mounted_sources(mountinfo)
+    devs = set()
+    if rec.uuid:
+        devs |= {d for d, u in uuids.items() if u.lower() == rec.uuid.lower()}
+    if rec.label:
+        devs |= {d for d, l in labels.items() if l == rec.label}
+    return sorted(d for d in devs if d not in mounted)
+
+
+def automount(cfg: Config, log: Callable[[str], None]) -> list[str]:
+    """Mount any connected-but-unmounted recorder card through udisks (no root needed). Returns devices mounted."""
+    for dev in list(_no_automount):
+        if not os.path.exists(dev):
+            _no_automount.discard(dev)
+    if not shutil.which("udisksctl"):
+        return []
+    done = []
+    for rec in recorders(cfg):
+        if not (rec.enabled and rec.auto_mount):
+            continue
+        for dev in unmounted_devices(rec):
+            if dev in _no_automount:
+                continue
+            _no_automount.add(dev)          # one attempt per appearance
+            r = subprocess.run(["udisksctl", "mount", "-b", dev, "--no-user-interaction"],
+                               capture_output=True, text=True, timeout=60)
+            if r.returncode == 0:
+                log(f"{rec.name}: {r.stdout.strip() or 'mounted ' + dev}")
+                done.append(dev)
+            else:
+                log(f"{rec.name}: could not mount {dev}: {r.stderr.strip() or r.stdout.strip()}")
+    return done
+
+
 def unmount(mount: Mount, log: Callable[[str], None]) -> bool:
     if not shutil.which("udisksctl") or not mount.source.startswith("/dev/"):
         log("udisksctl not available; unmount the card yourself before switching the recorder back.")
@@ -277,6 +336,7 @@ def unmount(mount: Mount, log: Callable[[str], None]) -> bool:
     if r.returncode != 0:
         log(f"Could not unmount {mount.target}: {r.stderr.strip()}")
         return False
+    _no_automount.add(os.path.realpath(mount.source))   # don't remount it while it's still plugged in
     log(f"Unmounted {mount.target}. Safe to switch the recorder out of card reader mode.")
     return True
 

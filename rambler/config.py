@@ -64,7 +64,7 @@ class Config:
     # Field recorders to import from when their card mounts (see recorders.py). Ships with a TASCAM X8 entry.
     recorders: list[dict] = field(default_factory=lambda: [{
         "name": "TASCAM X8", "label": "X8", "uuid": "", "card_subdir": "SOUND", "dest_subdir": "{year}",
-        "keep_card_folders": False, "exclude": ["UTILITY/*", "SOUNDPAD/*"], "auto_import": True,
+        "keep_card_folders": False, "exclude": ["UTILITY/*", "SOUNDPAD/*"], "auto_import": True, "auto_mount": True,
         "unmount_after": True, "enabled": True}])
     start_minimized: bool = False
 

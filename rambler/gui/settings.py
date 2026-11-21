@@ -258,6 +258,7 @@ class SettingsDialog(QDialog):
         self.r_dest.setPlaceholderText("{year} = year from the file name, e.g. 261121_0002 -> 2026")
         self.r_excl = QLineEdit()
         self.r_auto = QCheckBox("Import automatically when the card appears")
+        self.r_mount = QCheckBox("Mount the card myself if the desktop doesn't (e.g. COSMIC)")
         self.r_unmount = QCheckBox("Unmount the card when done (safe to switch the recorder back)")
         self.r_enabled = QCheckBox("Enabled")
         rf.addRow("Name", self.r_name)
@@ -270,6 +271,7 @@ class SettingsDialog(QDialog):
                             "Blank puts files at the top."))
         rf.addRow("Skip (globs, comma-sep.)", self.r_excl)
         rf.addRow("", self.r_auto)
+        rf.addRow("", self.r_mount)
         rf.addRow("", self.r_unmount)
         rf.addRow("", self.r_enabled)
         btn_add = QPushButton("Add from connected card…")
@@ -324,6 +326,7 @@ class SettingsDialog(QDialog):
         d["exclude"] = [x.strip() for x in self.r_excl.text().split(",") if x.strip()]
         d["auto_import"] = self.r_auto.isChecked()
         d["unmount_after"] = self.r_unmount.isChecked()
+        d["auto_mount"] = self.r_mount.isChecked()
         d["enabled"] = self.r_enabled.isChecked()
         self.rec_list.item(i).setText(d["name"] or "Recorder")
 
@@ -341,6 +344,7 @@ class SettingsDialog(QDialog):
         self.r_excl.setText(", ".join(r.exclude))
         self.r_auto.setChecked(r.auto_import)
         self.r_unmount.setChecked(r.unmount_after)
+        self.r_mount.setChecked(r.auto_mount)
         self.r_enabled.setChecked(r.enabled)
 
     def _rec_append(self, d):
