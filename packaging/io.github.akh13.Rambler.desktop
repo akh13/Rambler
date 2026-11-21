@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Rambler
+GenericName=Audio Transcriber
+Comment=Transcribe recordings with whisper and keep your drives in sync
+Exec=@BIN@ %F
+Icon=audio-input-microphone
+Terminal=false
+Categories=AudioVideo;Audio;Utility;
+MimeType=audio/mpeg;audio/x-wav;audio/wav;audio/flac;audio/ogg;audio/mp4;
+StartupWMClass=rambler
+Keywords=transcribe;whisper;subtitles;srt;journal;

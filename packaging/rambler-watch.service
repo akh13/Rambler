@@ -1,0 +1,13 @@
+# Headless alternative to keeping the GUI open: imports from recorders and syncs drives in the background.
+#   cp packaging/rambler-watch.service ~/.config/systemd/user/
+#   systemctl --user enable --now rambler-watch
+[Unit]
+Description=Rambler: import, transcribe and sync recordings when cards and drives appear
+
+[Service]
+ExecStart=%h/.local/bin/rambler watch
+Restart=on-failure
+Nice=5
+
+[Install]
+WantedBy=default.target
