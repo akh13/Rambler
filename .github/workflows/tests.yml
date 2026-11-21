@@ -4,8 +4,8 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg libegl1 libxkbcommon0 libxcb-cursor0
@@ -18,7 +18,7 @@ jobs:
   install-ubuntu:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: tests/install_e2e.sh
 
   install-fedora:
@@ -26,7 +26,7 @@ jobs:
     container: fedora:latest
     steps:
       - run: dnf install -y python3 git tar
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: tests/install_e2e.sh
 
   install-arch:
@@ -34,5 +34,5 @@ jobs:
     container: archlinux:latest
     steps:
       - run: pacman -Syu --noconfirm python git
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: tests/install_e2e.sh
