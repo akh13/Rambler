@@ -256,4 +256,13 @@ assert lr.transcribed and all(r.mix is lr for r in zoom if r is not lr)
 w._poll_drives()
 assert len(asked) == 1                      # not asked again while it stays plugged in
 print("new card ok")
+
+# a recording that failed earlier and then gets a transcript (retry, or another tool) stops saying Failed
+victim = next(r for r in w.model.recs if r.transcribed)
+w.model.set_overlay(victim.rel.as_posix(), "Failed")
+assert w.model.status_of(victim) != "Failed"
+w.start_scan()
+wait_idle()
+assert victim.rel.as_posix() not in w.model.overlay
+print("stale failed ok")
 w.close()

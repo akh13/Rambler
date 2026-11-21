@@ -54,7 +54,10 @@ class LibraryModel(QAbstractTableModel):
         self.beginResetModel()
         self.recs = recs
         self.n_audio_dirs = n_audio_dirs
-        self.overlay = {k: v for k, v in self.overlay.items() if v.startswith("Failed")}
+        # A failure stays visible across rescans, but only while the recording still has no transcript.
+        # Anything that later produces one (a retry, another tool) clears it.
+        done = {r.rel.as_posix() for r in recs if r.transcribed}
+        self.overlay = {k: v for k, v in self.overlay.items() if v.startswith("Failed") and k not in done}
         self.endResetModel()
 
     def set_overlay(self, key: str, state: str):
@@ -79,7 +82,10 @@ class LibraryModel(QAbstractTableModel):
         return None
 
     def status_of(self, r: Recording) -> str:
-        return self.overlay.get(r.rel.as_posix()) or r.status()
+        ov = self.overlay.get(r.rel.as_posix())
+        if ov and ov.startswith("Failed") and r.transcribed:
+            return r.status()
+        return ov or r.status()
 
     def data(self, index, role=Qt.DisplayRole):
         r = self.recs[index.row()]
