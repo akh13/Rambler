@@ -225,4 +225,35 @@ w.apply_theme()
 app.processEvents()
 w.grab().save(str(out_dir / "rambler-8-player-light.png"))
 print("search/edit/theme ok")
+
+# ---- an unknown Zoom H6 card appears: Rambler recognises it, asks, imports, groups the take
+from PySide6.QtWidgets import QMessageBox  # noqa: E402
+h6 = tmp / "media" / "H6_SD"
+for part in ("LR", "Tr1", "BU"):
+    tone(h6 / "FOLDER01" / "ZOOM0007" / f"ZOOM0007_{part}.WAV", 4)
+asked = []
+
+
+def fake_exec(box):
+    asked.append(box.text())
+    box.defaultButton().click()
+    return 0
+
+
+QMessageBox.exec = fake_exec
+R.list_mounts = lambda: [R.Mount(card, "/dev/sdz1", "1234-ABCD", "X8", "exfat"),
+                         R.Mount(h6, "/dev/sdq1", "7777-AAAA", "H6_SD", "vfat")]
+w._poll_drives()
+for _ in range(6):
+    wait_idle()
+print("asked:", asked)
+assert asked and "Zoom recorder card" in asked[0]
+assert any(r.get("profile") == "zoom" for r in w.cfg.recorders)
+zoom = [r for r in w.model.recs if "ZOOM0007" in r.name]
+assert len(zoom) == 3 and all(r.name[:6].isdigit() for r in zoom), [r.name for r in zoom]
+lr = next(r for r in zoom if r.name.endswith("_LR.WAV"))
+assert lr.transcribed and all(r.mix is lr for r in zoom if r is not lr)
+w._poll_drives()
+assert len(asked) == 1                      # not asked again while it stays plugged in
+print("new card ok")
 w.close()

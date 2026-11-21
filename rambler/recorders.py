@@ -22,6 +22,7 @@ from typing import Callable
 
 from .config import AUDIO_EXTS, DATA_DIR, Config
 from .library import walk_files
+from . import profiles
 from .pipeline import unique_dest
 from .syncer import copy_file
 
@@ -34,13 +35,15 @@ class Recorder:
     name: str = "TASCAM X8"
     label: str = "X8"               # volume label the recorder gives its card
     uuid: str = ""                  # filesystem UUID; matched first if set (changes when the card is formatted)
-    card_subdir: str = "SOUND"      # only look inside this folder on the card ("" = whole card)
+    card_subdir: str = "SOUND"      # folder(s) on the card holding recordings, comma-separated ("" = whole card)
     # Where imports land inside the primary recording folder. {year} comes from the file name
     # (261121_0002 -> 2026, 2026-11-21_... -> 2026) or, failing that, the file's date. {recorder} = name.
     dest_subdir: str = "{year}"
     keep_card_folders: bool = False  # recreate the card's subfolders under dest_subdir
     exclude: list[str] = field(default_factory=lambda: ["UTILITY/*", "SOUNDPAD/*"])
     auto_import: bool = True
+    profile: str = ""               # tascam / zoom / sony / olympus (see profiles.py); "" = plain card
+    rename_undated: bool = True     # ZOOM0001.WAV -> 261121-143000_ZOOM0001.WAV so card counters never collide
     auto_mount: bool = True         # mount the card ourselves if the desktop doesn't (e.g. COSMIC)
     unmount_after: bool = True
     enabled: bool = True
@@ -127,6 +130,36 @@ def list_mounts(mountinfo: str | None = None, labels: dict | None = None, uuids:
     return sorted(mounts.values(), key=lambda m: str(m.target))
 
 
+def recorder_for_card(mount: Mount, profile: "profiles.Profile") -> Recorder:
+    """A new Recorder entry for a recognised card."""
+    label = mount.label or mount.target.name
+    folders = profiles.folders_for(profile, mount.target)
+    return Recorder(name=f"{profile.name.split(' /')[0].split(' recorder')[0]} ({label})", label=label,
+                    uuid=mount.uuid, card_subdir=",".join(folders), dest_subdir="{year}",
+                    exclude=list(profile.exclude), profile=profile.id)
+
+
+def unclaimed(cfg: Config, mounts: list[Mount] | None = None) -> list[tuple[Mount, "profiles.Profile"]]:
+    """Removable volumes no configured recorder matches but that look like a recorder's card."""
+    mounts = list_mounts() if mounts is None else mounts
+    claimed = {str(m.target) for m in (match(r, mounts) for r in recorders(cfg)) if m is not None}
+    lib = [Config.expand(d) for d in cfg.audio_dirs + cfg.transcript_dirs]
+    ignored = {x.lower() for x in cfg.ignored_cards}
+    out = []
+    for m in mounts:
+        if str(m.target) in claimed or not m.target.is_dir():
+            continue
+        if (m.uuid and m.uuid.lower() in ignored) or (m.label and m.label.lower() in ignored):
+            continue
+        # never treat a drive that holds the library itself as a recorder card
+        if any(str(d).startswith(str(m.target) + os.sep) or d == m.target for d in lib):
+            continue
+        p = profiles.identify(m.target, m.label)
+        if p is not None:
+            out.append((m, p))
+    return out
+
+
 def recorders(cfg: Config) -> list[Recorder]:
     return [Recorder.from_dict(d) for d in cfg.recorders]
 
@@ -186,10 +219,25 @@ def year_of(name: str, mtime: float) -> str:
     return time.strftime("%Y", time.localtime(mtime))
 
 
-def dest_rel(rec: Recorder, rel: PurePosixPath, st: os.stat_result) -> PurePosixPath:
-    sub = rec.dest_subdir.replace("{year}", year_of(rel.name, st.st_mtime)).replace("{recorder}", rec.name)
+def dest_rel(rec: Recorder, rel: PurePosixPath, st: os.stat_result,
+             take_time: float | None = None) -> PurePosixPath:
+    """Where a card file lands in the library. Undated counter names get the take's date prefixed."""
+    name = profiles.dated_name(rel.name, take_time or st.st_mtime) if rec.rename_undated else rel.name
+    sub = rec.dest_subdir.replace("{year}", year_of(name, st.st_mtime)).replace("{recorder}", rec.name)
     base = PurePosixPath(sub.strip("/")) if sub.strip("/") else PurePosixPath()
-    return base / (rel if rec.keep_card_folders else rel.name)
+    return base / (rel.parent / name if rec.keep_card_folders else name)
+
+
+def card_roots(rec: Recorder, mount: Mount) -> list[Path]:
+    """The folders on the card to read recordings from (falls back to the whole card)."""
+    roots = []
+    for sub in [x.strip() for x in rec.card_subdir.split(",")] or [""]:
+        if not sub:
+            return [mount.target]
+        hit = profiles.ci_path(mount.target, sub)
+        if hit is not None and hit.is_dir():
+            roots.append(hit)
+    return roots or [mount.target]
 
 
 def library_index(cfg: Config) -> set[tuple[str, int]]:
@@ -206,23 +254,29 @@ def library_index(cfg: Config) -> set[tuple[str, int]]:
 def pending(rec: Recorder, mount: Mount, cfg: Config | None = None) -> list[tuple[Path, PurePosixPath, os.stat_result]]:
     """Recordings on the card that aren't in the ledger and (if cfg given) aren't already in the library
     under the same name and size, wherever they were filed."""
-    root = mount.target / rec.card_subdir if rec.card_subdir else mount.target
-    if not root.is_dir():
-        root = mount.target          # card without the expected folder: look everywhere
-    if not root.is_dir():
-        return []
+    roots = card_roots(rec, mount)
     seen = set(_load_ledger().get(rec.name, []))
     have = library_index(cfg) if cfg is not None else set()
     exts = {e.lower() for e in AUDIO_EXTS}
+    found = []
+    for root in roots:
+        for rel, st in walk_files(root):
+            if rel.suffix.lower() not in exts:
+                continue
+            on_card = (root / rel).relative_to(mount.target).as_posix()
+            if any(fnmatch.fnmatch(rel.as_posix(), pat) or fnmatch.fnmatch(on_card, pat) for pat in rec.exclude):
+                continue
+            found.append((root / rel, rel, st))
+    times = profiles.take_times([(rel, st.st_mtime) for _, rel, st in found])
     out = []
-    for rel, st in walk_files(root):
-        if rel.suffix.lower() not in exts:
+    for src, rel, st in found:
+        if _key(rel, st) in seen:
             continue
-        if any(fnmatch.fnmatch(rel.as_posix(), pat) for pat in rec.exclude):
+        t = times.get((rel.parent.as_posix(), profiles.take_of(rel.stem)[0].lower()))
+        lib_name = dest_rel(rec, rel, st, t).name.lower()
+        if (rel.name.lower(), st.st_size) in have or (lib_name, st.st_size) in have:
             continue
-        if _key(rel, st) in seen or (rel.name.lower(), st.st_size) in have:
-            continue
-        out.append((root / rel, rel, st))
+        out.append((src, rel, st))
     return out
 
 
@@ -235,6 +289,7 @@ def import_recorder(cfg: Config, rec: Recorder, mount: Mount, log: Callable[[str
         raise RuntimeError("No recording folder is connected to import into.")
     dest_root = roots[0]
     items = pending(rec, mount, cfg)
+    times = profiles.take_times([(rel, st.st_mtime) for _, rel, st in items])
     total = sum(st.st_size for _, _, st in items)
     free = shutil.disk_usage(dest_root).free
     if total > free:
@@ -246,7 +301,7 @@ def import_recorder(cfg: Config, rec: Recorder, mount: Mount, log: Callable[[str
     for src, rel, st in items:
         if cancel is not None and cancel.is_set():
             break
-        target = dest_rel(rec, rel, st)
+        target = dest_rel(rec, rel, st, times.get((rel.parent.as_posix(), profiles.take_of(rel.stem)[0].lower())))
         dst = dest_root / target
         if dst.exists() and dst.stat().st_size == st.st_size:
             log(f"already have {target}")
@@ -310,20 +365,32 @@ def automount(cfg: Config, log: Callable[[str], None]) -> list[str]:
     if not shutil.which("udisksctl"):
         return []
     done = []
+    todo: list[tuple[str, str]] = []
     for rec in recorders(cfg):
-        if not (rec.enabled and rec.auto_mount):
+        if rec.enabled and rec.auto_mount:
+            todo += [(dev, rec.name) for dev in unmounted_devices(rec)]
+    if cfg.mount_new_cards:
+        # cards nobody has set up yet, but whose label says "recorder" (X8, H6_SD, DR-05X, ...)
+        ignored = {x.lower() for x in cfg.ignored_cards}
+        try:
+            mi = Path("/proc/self/mountinfo").read_text()
+        except OSError:
+            mi = ""
+        mounted = _mounted_sources(mi)
+        for dev, label in _disk_links("by-label").items():
+            if dev not in mounted and profiles.looks_like_recorder_label(label) and label.lower() not in ignored:
+                todo.append((dev, label))
+    for dev, who in dict(todo).items():
+        if dev in _no_automount:
             continue
-        for dev in unmounted_devices(rec):
-            if dev in _no_automount:
-                continue
-            _no_automount.add(dev)          # one attempt per appearance
-            r = subprocess.run(["udisksctl", "mount", "-b", dev, "--no-user-interaction"],
-                               capture_output=True, text=True, timeout=60)
-            if r.returncode == 0:
-                log(f"{rec.name}: {r.stdout.strip() or 'mounted ' + dev}")
-                done.append(dev)
-            else:
-                log(f"{rec.name}: could not mount {dev}: {r.stderr.strip() or r.stdout.strip()}")
+        _no_automount.add(dev)          # one attempt per appearance
+        r = subprocess.run(["udisksctl", "mount", "-b", dev, "--no-user-interaction"],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            log(f"{who}: {r.stdout.strip() or 'mounted ' + dev}")
+            done.append(dev)
+        else:
+            log(f"{who}: could not mount {dev}: {r.stderr.strip() or r.stdout.strip()}")
     return done
 
 

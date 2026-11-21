@@ -32,8 +32,8 @@ from .workers import JobContext, Worker
 COLS = ["Status", "Recording", "Folder", "Size", "Modified", "Copies", "Subtitles", "Speakers", "Summary"]
 STATUS_COLORS = {
     "To be transcribed": "pending", "Transcribed (no SRT)": "nosrt", "Transcribed": "done",
-    "Failed": "failed", "Queued": "muted", "Too short": "muted", "Track (MIX transcribed)": "muted",
-    "Track (MIX pending)": "muted",
+    "Failed": "failed", "Queued": "muted", "Too short": "muted", "Track (mix transcribed)": "muted",
+    "Track (mix pending)": "muted",
 }
 
 
@@ -530,6 +530,8 @@ class MainWindow(QMainWindow):
             R.automount(self.cfg, self.log)   # desktops like COSMIC only mount when you open the drive
         conns = R.connected(self.cfg)
         self._recorders_now = conns
+        if not self.busy():
+            self._offer_new_cards()
         seen = {r.name: m for r, m in conns}
         for rec in R.recorders(self.cfg):
             state = self._rec_state.get(rec.name, ("absent", ""))[0]
@@ -561,6 +563,44 @@ class MainWindow(QMainWindow):
             self.log(f"{r.name} connected at {m.target}")
             self.import_from_recorder(r, m)
             return
+
+    def _offer_new_cards(self):
+        """A recorder card we don't know yet (Zoom, Sony, another TASCAM...): ask once per insertion."""
+        mounts = R.list_mounts()
+        present = {f"{m.source}|{m.target}" for m in mounts}
+        self._offered = getattr(self, "_offered", set()) & present
+        fresh = [m for m in mounts if f"{m.source}|{m.target}" not in self._offered]
+        if not fresh:
+            return
+        for m in fresh:
+            self._offered.add(f"{m.source}|{m.target}")
+        for m, prof in R.unclaimed(self.cfg, fresh):
+            label = m.label or m.target.name
+            self.log(f"{label}: looks like a {prof.name} card ({m.target})")
+            if self.isMinimized():
+                self._notify(APP_NAME, f"{prof.name} card connected ({label}). Open Rambler to import it.")
+            box = QMessageBox(self)
+            box.setWindowTitle(APP_NAME)
+            box.setIcon(QMessageBox.Question)
+            box.setText(f"A {prof.name} card is connected ({label}).")
+            box.setInformativeText("Import its recordings into your library, transcribe them and sync? "
+                                   "Nothing on the card is changed.")
+            b_yes = box.addButton("Import, and do this automatically next time", QMessageBox.AcceptRole)
+            box.addButton("Not now", QMessageBox.RejectRole)
+            b_never = box.addButton("Never for this card", QMessageBox.DestructiveRole)
+            box.setDefaultButton(b_yes)
+            box.exec()
+            if box.clickedButton() is b_never:
+                self.cfg.ignored_cards.append(m.uuid or label)
+                self.cfg.save()
+            elif box.clickedButton() is b_yes:
+                rec = R.recorder_for_card(m, prof)
+                self.cfg.recorders.append(rec.to_dict())
+                self.cfg.save()
+                self.log(f"Added recorder {rec.name} (reads {rec.card_subdir or 'the whole card'}).")
+                self._refresh_drive_bar()
+                self.import_from_recorder(rec, m)
+                return
 
     def import_from_recorder(self, rec: "R.Recorder", mount: "R.Mount"):
         if self.busy():

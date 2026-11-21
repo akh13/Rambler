@@ -184,7 +184,7 @@ def test_library_rules(env, tmp_path):
     assert by["2022/221214_0194.wav"].transcribed
     assert by["2026/261119_0009_MIX.wav"].pending
     t = by["2026/261119_0009_6.wav"]
-    assert not t.pending and t.status() == "Track (MIX pending)"
+    assert not t.pending and t.status() == "Track (mix pending)"
     assert by["2026/blip.wav"].status() == "Too short" and not by["2026/blip.wav"].pending
     eng = WhisperCppEngine(cfg)
     transcribe_one(cfg, eng, by["2026/261119_0009_MIX.wav"], True, lambda f, m: None, threading.Event())
@@ -193,7 +193,7 @@ def test_library_rules(env, tmp_path):
     j = json.loads((t1 / "261119_0009_MIX.json").read_text())
     assert j["audio"] == "2026/261119_0009_MIX.wav" and j["model"] == "large-v3" and j["segments"]
     by = {r.rel.as_posix(): r for r in scan(cfg)}
-    assert by["2026/261119_0009_1-2.wav"].status() == "Track (MIX transcribed)"
+    assert by["2026/261119_0009_1-2.wav"].status() == "Track (mix transcribed)"
 
 
 def test_pipeline_lock():
@@ -260,7 +260,7 @@ def test_automount(monkeypatch):
     monkeypatch.setattr(R.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
     R._no_automount.clear()
     from rambler.config import Config
-    cfg = Config()
+    cfg = Config(mount_new_cards=False)
     assert R.automount(cfg, lambda m: None) == ["/dev/sdc1"]
     assert calls[-1][:3] == ["udisksctl", "mount", "-b"]
     assert R.automount(cfg, lambda m: None) == []          # only once per appearance
@@ -443,3 +443,115 @@ def test_package_names_per_distro(monkeypatch):
         assert cmd in se.install_command(["x"])
     monkeypatch.setattr(se, "package_manager", lambda: "apt")
     assert se.missing_packages("cuda")[-1] == "system76-cuda-latest"
+
+
+def _card_wav(path, secs=1, brand=None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=frequency=220:duration={secs}"]
+    if brand:
+        cmd += ["-metadata", f"comment={brand}"]
+    subprocess.run(cmd + [str(path)], check=True)
+
+
+def test_recorder_profiles_identify(tmp_path):
+    from rambler import profiles as P
+    cards = tmp_path / "cards"
+    # TASCAM DR-05X: dr-1.sys (any case), MUSIC, UTILITY, counter names
+    (cards / "dr05x").mkdir(parents=True)
+    (cards / "dr05x" / "DR-1.SYS").write_bytes(b"x")
+    _card_wav(cards / "dr05x" / "MUSIC" / "DR0000_0001.wav")
+    (cards / "dr05x" / "UTILITY").mkdir()
+    # Zoom H6 project folders
+    for part in ("LR", "Tr1", "Tr34", "BU"):
+        _card_wav(cards / "h6" / "FOLDER01" / "ZOOM0002" / f"ZOOM0002_{part}.WAV")
+    (cards / "h6" / "FOLDER01" / "ZOOM0002" / "ZOOM0002.hprj").write_bytes(b"x")
+    # Zoom H1n: STEREO/FOLDER01
+    _card_wav(cards / "H1N_SD" / "STEREO" / "FOLDER01" / "ZOOM0001.WAV")
+    # Zoom F3-style card with no telltale folders: identified from the WAV header
+    _card_wav(cards / "f3" / "210101_001_Tr1.WAV", brand="ZOOM F3")
+    # Sony and OM System
+    _card_wav(cards / "sony" / "PRIVATE" / "SONY" / "REC_FILE" / "FOLDER01" / "200101_1230.wav")
+    _card_wav(cards / "om" / "Recorder" / "Folder A" / "LS_P5 0001.wav")
+    # an ordinary USB stick with music: not a recorder card
+    _card_wav(cards / "stick" / "Music" / "song.wav")
+    got = {d.name: (P.identify(d, d.name) or P.Profile("none", "none")).id for d in cards.iterdir()}
+    assert got == {"dr05x": "tascam", "h6": "zoom", "H1N_SD": "zoom", "f3": "zoom", "sony": "sony",
+                   "om": "olympus", "stick": "none"}, got
+    assert P.folders_for(P.BY_ID["tascam"], cards / "dr05x") == ["MUSIC"]
+    assert P.folders_for(P.BY_ID["sony"], cards / "sony") == ["PRIVATE/SONY/REC_FILE"]
+    assert P.folders_for(P.BY_ID["olympus"], cards / "om") == ["Recorder"]
+    assert P.is_dated("261121_0002.wav") and P.is_dated("2026-11-13_215550_000.wav") and P.is_dated("210101_001_Tr1.WAV")
+    assert not P.is_dated("ZOOM0001.WAV") and not P.is_dated("DR0000_0001.wav") and not P.is_dated("LS_P5 0001.wav")
+
+
+def test_import_from_zoom_and_dr05x(env, tmp_path, monkeypatch):
+    from rambler import profiles as P
+    from rambler import recorders as R
+    cfg, a1, a2, t1, t2 = env
+    monkeypatch.setattr(R, "LEDGER", tmp_path / "ledger.json")
+    h6 = tmp_path / "H6_SD"
+    for i, part in enumerate(("LR", "Tr1", "Tr34", "BU")):
+        f = h6 / "FOLDER01" / "ZOOM0002" / f"ZOOM0002_{part}.WAV"
+        _card_wav(f, secs=3)
+        t = 1795250000 + i * 3                     # files of one take finish a few seconds apart
+        os.utime(f, (t, t))
+    _card_wav(h6 / "FOLDER02" / "ZOOM0001" / "ZOOM0001_LR.WAV", secs=3)   # a different take
+    mount = R.Mount(h6, "/dev/sdx1", "AB12-CD34", "H6_SD", "vfat")
+    (m, prof), = R.unclaimed(cfg, [mount])
+    rec = R.recorder_for_card(m, prof)
+    assert rec.profile == "zoom" and rec.uuid == "AB12-CD34" and rec.card_subdir == "" and "Zoom" in rec.name
+    got = R.import_recorder(cfg, rec, mount, lambda s: None)
+    names = sorted(g.name for g in got)
+    prefix = time.strftime("%y%m%d-%H%M%S_", time.localtime(1795250000))
+    assert [n for n in names if "ZOOM0002" in n] == sorted(prefix + f"ZOOM0002_{p}.WAV" for p in ("BU", "LR", "Tr1", "Tr34"))
+    assert all(g.parts[0] == time.strftime("%Y", time.localtime(1795250000)) or "ZOOM0001" in g.name for g in got)
+    assert R.import_recorder(cfg, rec, mount, lambda s: None) == []          # nothing new next time
+    recs = {r.name: r for r in scan(cfg)}
+    lr = recs[prefix + "ZOOM0002_LR.WAV"]
+    assert lr.pending and all(recs[prefix + f"ZOOM0002_{p}.WAV"].mix is lr for p in ("Tr1", "Tr34", "BU"))
+    assert sum(1 for r in recs.values() if r.pending) == 2                   # the two LR files, nothing else
+    # a drive holding the library is never offered as a recorder card, even full of recorder WAVs
+    lib_mount = R.Mount(a1.parent, "/dev/sdy1", "", "TOSHIBA EXT", "ntfs")
+    (a1 / "x").mkdir(exist_ok=True)
+    _card_wav(a1 / "x" / "rec.wav", brand="TASCAM X8")
+    assert R.unclaimed(cfg, [lib_mount]) == []
+    cfg.ignored_cards = ["ab12-cd34"]
+    assert R.unclaimed(cfg, [mount]) == []                                   # "never for this card"
+
+    # TASCAM DR-05X with counter names
+    dr = tmp_path / "DR05X"
+    (dr / "UTILITY").mkdir(parents=True)
+    (dr / "dr-1.sys").write_bytes(b"x")
+    _card_wav(dr / "MUSIC" / "DR0000_0001.wav")
+    dm = R.Mount(dr, "/dev/sdz1", "", "DR05X", "vfat")
+    (m2, p2), = R.unclaimed(cfg, [dm])
+    rec2 = R.recorder_for_card(m2, p2)
+    assert rec2.card_subdir == "MUSIC" and rec2.profile == "tascam"
+    got2 = R.import_recorder(cfg, rec2, dm, lambda s: None)
+    assert len(got2) == 1 and got2[0].name.endswith("_DR0000_0001.wav") and P.is_dated(got2[0].name)
+
+
+def test_recorder_labels_and_new_card_mount(monkeypatch):
+    from rambler import profiles as P
+    from rambler import recorders as R
+    from rambler.config import Config
+    for good in ("X8", "X4", "H6_SD", "H4N_SD", "H1N_SD", "DR-05X", "DR-40X", "LS-P5"):
+        assert P.looks_like_recorder_label(good), good
+    for bad in ("TOSHIBA EXT", "Artwork", "XBOX", "HOME", "OMEGA", "F1-DATA", "H2O"):
+        assert not P.looks_like_recorder_label(bad), bad
+    monkeypatch.setattr(R, "unmounted_devices", lambda r, *a: [])
+    monkeypatch.setattr(R, "_disk_links", lambda kind: {"/dev/sdq1": "H6_SD", "/dev/sdr1": "TOSHIBA EXT"}
+                        if kind == "by-label" else {})
+    monkeypatch.setattr(R.shutil, "which", lambda x: "/usr/bin/" + x)
+    monkeypatch.setattr(R.os.path, "exists", lambda p: True)
+    calls = []
+
+    class Done:
+        returncode, stdout, stderr = 0, "Mounted", ""
+    monkeypatch.setattr(R.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
+    R._no_automount.clear()
+    assert R.automount(Config(), lambda m: None) == ["/dev/sdq1"]        # the H6 card, not the backup drive
+    R._no_automount.clear()
+    assert R.automount(Config(mount_new_cards=False), lambda m: None) == []
+    R._no_automount.clear()
+    assert R.automount(Config(ignored_cards=["h6_sd"]), lambda m: None) == []

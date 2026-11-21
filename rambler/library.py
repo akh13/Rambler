@@ -32,7 +32,6 @@ def walk_files(root: Path):
             yield rel, st
 
 
-TRACK_RE = re.compile(r"^(?P<take>.+)_(?P<part>MIX|\d+(?:-\d+)?)$", re.I)
 MIN_SECONDS = 2.0   # shorter clips are accidental presses; whisper only hallucinates on them
 
 
@@ -87,7 +86,7 @@ class Recording:
     txt: Path | None = None
     srt: Path | None = None
     meta: Path | None = None
-    mix: "Recording | None" = None   # set on multitrack track files: the take's _MIX file
+    mix: "Recording | None" = None   # set on multitrack track/backup files: the take's main (mix) file
     too_short: bool = False
 
     @property
@@ -119,7 +118,7 @@ class Recording:
         if self.txt:
             return "Transcribed" if self.srt else "Transcribed (no SRT)"
         if self.mix is not None:
-            return "Track (MIX transcribed)" if self.mix.txt else "Track (MIX pending)"
+            return "Track (mix transcribed)" if self.mix.txt else "Track (mix pending)"
         if self.too_short:
             return "Too short"
         return "To be transcribed"
@@ -196,16 +195,21 @@ def scan(cfg: Config, audio_exts: list[str] | None = None) -> list[Recording]:
             secs = audio_seconds(r.source, r.size)
             r.too_short = secs is not None and secs < MIN_SECONDS
 
-    # Multitrack takes (TASCAM X8 etc.): <take>_MIX plus <take>_1-2, <take>_5 ... Only the MIX is transcribed.
-    mixes = {}
+    # Multitrack takes: one file per take is the "main" one that gets transcribed (TASCAM <take>_MIX,
+    # Zoom mixdown <take>_ST001, then the stereo <take>_LR / _TrLR). Tracks, backups (_BU) and other
+    # parts of a take that has a main file are listed but not transcribed.
+    from .profiles import main_rank, take_of
+    groups: dict[tuple, list[tuple[Recording, str]]] = {}
     for r in recs.values():
-        m = TRACK_RE.match(r.rel.stem)
-        if m and m.group("part").upper() == "MIX":
-            mixes[(r.rel.parent, m.group("take").lower())] = r
-    for r in recs.values():
-        m = TRACK_RE.match(r.rel.stem)
-        if m and m.group("part").upper() != "MIX":
-            mix = mixes.get((r.rel.parent, m.group("take").lower()))
-            if mix is not None:
-                r.mix = mix
+        take, part = take_of(r.rel.stem)
+        if part:
+            groups.setdefault((r.rel.parent, take.lower()), []).append((r, part))
+    for members in groups.values():
+        ranked = [(main_rank(part), r) for r, part in members if main_rank(part) is not None]
+        if not ranked:
+            continue
+        main = min(ranked, key=lambda x: x[0])[1]
+        for r, _ in members:
+            if r is not main:
+                r.mix = main
     return sorted(recs.values(), key=lambda r: r.rel.as_posix().lower())

@@ -191,14 +191,24 @@ def cmd_import(cfg: Config, args) -> int:
     from . import recorders as R
     if args.source:
         # treat a folder as the card (no mount detection): handy for testing or odd mounts
+        from . import profiles as P
+        src = Path(args.source)
         recs = R.recorders(cfg)
-        rec = next((r for r in recs if r.name == args.recorder), recs[0] if recs else R.Recorder())
-        conns = [(rec, R.Mount(Path(args.source), "", "", rec.label, ""))]
+        rec = next((r for r in recs if r.name == args.recorder), None)
+        mount = R.Mount(src, "", "", src.name, "")
+        if rec is None:
+            prof = P.identify(src, src.name)
+            if prof is not None:
+                rec = R.recorder_for_card(mount, prof)
+                print(f"Looks like a {prof.name} card; reading {rec.card_subdir or 'the whole card'}.")
+            else:
+                rec = recs[0] if recs else R.Recorder()
+        conns = [(rec, mount)]
     else:
         conns = R.connected(cfg)
     if args.dry_run:
         for rec, m in conns:
-            root = m.target / rec.card_subdir if rec.card_subdir else m.target
+            root = ", ".join(str(x) for x in R.card_roots(rec, m))
             todo = R.pending(rec, m, cfg)
             print(f"{rec.name} at {root}: {len(todo)} recording(s) to import")
             dest = cfg.audio_roots()[0] if cfg.audio_roots() else Path("<no recording folder connected>")
@@ -232,6 +242,8 @@ def cmd_recorders(cfg: Config, args) -> int:
         for dev in R.unmounted_devices(r):
             print(f"  {dev}  label={r.label}  NOT MOUNTED -> {r.name}"
                   + ("  (Rambler will mount it)" if r.auto_mount else "  (auto-mount is off)"))
+    for m, prof in R.unclaimed(cfg, mounts):
+        print(f"  {m.target} looks like a {prof.name} card (not set up yet; Rambler will offer to import it)")
     print("Configured recorders:")
     for r in R.recorders(cfg):
         m = R.match(r, mounts)

@@ -260,9 +260,17 @@ class SettingsDialog(QDialog):
         self.r_excl = QLineEdit()
         self.r_auto = QCheckBox("Import automatically when the card appears")
         self.r_mount = QCheckBox("Mount the card myself if the desktop doesn't (e.g. COSMIC)")
+        from ..profiles import PROFILES
+        self.r_profile = QComboBox()
+        self.r_profile.addItem("Plain card / other", "")
+        for prof in PROFILES:
+            self.r_profile.addItem(prof.name, prof.id)
+        self.r_profile.setToolTip("Tells Rambler how this recorder names multitrack takes and backups")
+        self.r_rename = QCheckBox("Put the date in front of counter-style names (ZOOM0001.WAV → 261121-143000_ZOOM0001.WAV)")
         self.r_unmount = QCheckBox("Unmount the card when done (safe to switch the recorder back)")
         self.r_enabled = QCheckBox("Enabled")
         rf.addRow("Name", self.r_name)
+        rf.addRow("Card type", self.r_profile)
         rf.addRow("Volume label", self.r_label)
         rf.addRow("Filesystem UUID", self.r_uuid)
         rf.addRow("Folder on card", self.r_card)
@@ -273,6 +281,7 @@ class SettingsDialog(QDialog):
         rf.addRow("Skip (globs, comma-sep.)", self.r_excl)
         rf.addRow("", self.r_auto)
         rf.addRow("", self.r_mount)
+        rf.addRow("", self.r_rename)
         rf.addRow("", self.r_unmount)
         rf.addRow("", self.r_enabled)
         btn_add = QPushButton("Add from connected card…")
@@ -299,6 +308,9 @@ class SettingsDialog(QDialog):
             self.rec_list.setCurrentRow(0)
         else:
             form_w.setEnabled(False)
+        self.new_cards = QCheckBox("Recognise new cards (TASCAM, Zoom, Sony, OM System) and offer to import them")
+        self.new_cards.setChecked(cfg.mount_new_cards)
+        rl.addWidget(self.new_cards)
         tabs.addTab(rw, "Recorders")
 
         # Appearance
@@ -385,6 +397,8 @@ class SettingsDialog(QDialog):
         d["auto_import"] = self.r_auto.isChecked()
         d["unmount_after"] = self.r_unmount.isChecked()
         d["auto_mount"] = self.r_mount.isChecked()
+        d["profile"] = self.r_profile.currentData() or ""
+        d["rename_undated"] = self.r_rename.isChecked()
         d["enabled"] = self.r_enabled.isChecked()
         self.rec_list.item(i).setText(d["name"] or "Recorder")
 
@@ -403,6 +417,8 @@ class SettingsDialog(QDialog):
         self.r_auto.setChecked(r.auto_import)
         self.r_unmount.setChecked(r.unmount_after)
         self.r_mount.setChecked(r.auto_mount)
+        self.r_profile.setCurrentIndex(max(0, self.r_profile.findData(r.profile)))
+        self.r_rename.setChecked(r.rename_undated)
         self.r_enabled.setChecked(r.enabled)
 
     def _rec_append(self, d):
@@ -431,11 +447,17 @@ class SettingsDialog(QDialog):
         for mt in mounts:
             label = mt.label or mt.target.name
             m.addAction(f"{label}  ·  {mt.target}  ·  {mt.fstype}  ·  UUID {mt.uuid or '?'}",
-                        lambda mt=mt, label=label: self._rec_append({
-                            "name": "TASCAM X8" if label == "X8" else label, "label": mt.label, "uuid": mt.uuid,
-                            "card_subdir": "SOUND" if label == "X8" else "",
-                            "dest_subdir": "{year}"}))
+                        lambda mt=mt, label=label: self._rec_append(self._recorder_dict_for(mt, label)))
         m.exec(QCursor.pos())
+
+    @staticmethod
+    def _recorder_dict_for(mt, label) -> dict:
+        from .. import profiles
+        from ..recorders import Recorder, recorder_for_card
+        prof = profiles.identify(mt.target, mt.label)
+        if prof is not None:
+            return recorder_for_card(mt, prof).to_dict()
+        return Recorder(name=label, label=mt.label, uuid=mt.uuid, card_subdir="", profile="").to_dict()
 
     def _engine_setup(self):
         from .engine_setup import EngineSetupDialog
@@ -550,6 +572,8 @@ class SettingsDialog(QDialog):
         if hasattr(self, "rec_data"):
             self._rec_store()
             c.recorders = [dict(d) for d in self.rec_data]
+        if hasattr(self, "new_cards"):
+            c.mount_new_cards = self.new_cards.isChecked()
         if hasattr(self, "autostart"):
             c.start_minimized = self.autostart.isChecked()
         if hasattr(self, "theme"):
