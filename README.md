@@ -100,7 +100,25 @@ UUID as well. When the card mounts, Rambler:
 If your desktop doesn't mount drives until you open them (COSMIC, some minimal setups), Rambler mounts the
 card itself through udisks, the same way the file manager would, and leaves it alone once it has unmounted it.
 
-Any recorder or camera that shows up as a USB drive works the same way: add it with its label or UUID.
+**Other recorders.** Rambler recognises cards from the common field recorders by what's on them, so a new
+card gets a one-time prompt: import it (and do so automatically from then on), not now, or never.
+
+| Recorder | Recognised by | Recordings read from |
+|---|---|---|
+| TASCAM Portacapture X4/X6/X8, DR-05X/07X/40X/08/10 and others | `dr-1.sys` on the card | `SOUND` or `MUSIC` |
+| Zoom H1n/H2n/H4n/H5/H6/H8, essential series, F-series | `STEREO/FOLDER01`, `FOLDERxx/ZOOMnnnn`, `H?N_SD` label, or "ZOOM" in the WAV header | the whole card |
+| Sony ICD and PCM recorders | `PRIVATE/SONY` or `REC_FILE` | `REC_FILE` |
+| OM System / Olympus LS-P and DM | `RECORDER` folder | `RECORDER` |
+
+Multitrack takes keep every file but only one is transcribed: TASCAM's `_MIX`, otherwise a Zoom mixdown
+(`_ST001`) or the stereo `_LR`/`_TrLR`. Zoom's `_BU` safety backups are kept but not transcribed. Recorders
+that number files with a counter (`ZOOM0001.WAV`, `DR0000_0001.wav`) restart it on every new card, so on
+import those names get the take's date in front (`261121-143000_ZOOM0001_LR.WAV`), the same for every file
+of a take. Date-named files are left exactly as they are.
+
+Cards whose label can only be a recorder's (`X8`, `H6_SD`, `DR-05X`...) are mounted for you even on desktops
+that don't automount. Anything else that shows up as a USB drive can be added by hand in Settings →
+Recorders → *Add from connected card*.
 
 ![Recorders](docs/recorders.png)
 
