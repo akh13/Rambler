@@ -116,6 +116,17 @@ that number files with a counter (`ZOOM0001.WAV`, `DR0000_0001.wav`) restart it 
 import those names get the take's date in front (`261121-143000_ZOOM0001_LR.WAV`), the same for every file
 of a take. Date-named files are left exactly as they are.
 
+With **Group takes** ticked (above the library), the other files of a multitrack take sit folded under the
+mix, so a 6-track take is one row instead of seven. Untick it to see every file as its own row.
+
+**Tags.** Right-click recordings → *Tags* to mark them Work, Personal, or anything you like, each with its
+own colour. Pick a tag in the filter next to the search box to show only those recordings, or *Untagged*
+to find what still needs sorting; the search tab can be limited to a tag too. Tags are kept in
+`rambler-tags.json` in every transcript folder, so they travel with your transcripts to every drive, and
+they're included when transcripts are sent to Open WebUI.
+
+![Tags and grouped takes](docs/tags.png)
+
 Cards whose label can only be a recorder's (`X8`, `H6_SD`, `DR-05X`...) are mounted for you even on desktops
 that don't automount. Anything else that shows up as a USB drive can be added by hand in Settings →
 Recorders → *Add from connected card*.

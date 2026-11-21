@@ -71,6 +71,7 @@ class Config:
     mount_new_cards: bool = True         # mount unopened cards whose label says recorder (X8, H6_SD, DR-05X...)
 
     theme: str = "system"                # system | light | dark
+    group_takes: bool = True             # nest multitrack tracks under the take's mix in the library
     show_waveform: bool = True           # recording's waveform behind the subtitles
     live_visualizer: bool = True         # moving level bars while playing
     show_confidence: bool = True         # mark words Whisper wasn't sure about

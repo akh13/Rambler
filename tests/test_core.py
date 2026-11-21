@@ -555,3 +555,36 @@ def test_recorder_labels_and_new_card_mount(monkeypatch):
     assert R.automount(Config(mount_new_cards=False), lambda m: None) == []
     R._no_automount.clear()
     assert R.automount(Config(ignored_cards=["h6_sd"]), lambda m: None) == []
+
+
+def test_tag_store(env):
+    from rambler.tags import FILE, TagStore
+    cfg, a1, a2, t1, t2 = env
+    st = TagStore.load(cfg)
+    assert st.names() == []
+    work = st.create("  Work ")
+    home = st.create("Personal")
+    assert work == "Work" and st.color("Work") != st.color("Personal")
+    st.assign(["2026/a.wav", "2026/b.wav"], "Work")
+    st.assign(["2026/b.wav"], "Personal")
+    st.save(cfg)
+    assert (t1 / FILE).exists() and (t2 / FILE).read_text() == (t1 / FILE).read_text()   # every drive
+    st2 = TagStore.load(cfg)
+    assert st2.of("2026/b.wav") == ["Work", "Personal"] and st2.recordings_with("Work") == {"2026/a.wav", "2026/b.wav"}
+    st2.rename("Personal", "Home")
+    assert st2.of("2026/b.wav") == ["Work", "Home"] and "Personal" not in st2.colors
+    st2.rename("Home", "Work")                        # merging into an existing tag
+    assert st2.of("2026/b.wav") == ["Work"] and st2.names() == ["Work"]
+    st2.assign(["2026/a.wav"], "Work", on=False)
+    assert "2026/a.wav" not in st2.by_rec
+    st2.delete("Work")
+    assert st2.by_rec == {} and st2.names() == []
+    # newest copy wins when the drives disagree (one was unplugged while tagging)
+    import time as _t
+    st.save(cfg)
+    other = TagStore.load(cfg)
+    other.create("Later")
+    (t2 / FILE).write_text(__import__("json").dumps({"tags": {"Later": "#000000"}, "recordings": {}}))
+    _now = _t.time() + 5
+    os.utime(t2 / FILE, (_now, _now))
+    assert TagStore.load(cfg).names() == ["Later"]

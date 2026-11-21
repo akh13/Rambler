@@ -90,9 +90,11 @@ class Client:
                 raise
 
 
-def document(rec) -> str:
+def document(rec, tags: list[str] | None = None) -> str:
     t = Transcript.for_recording(rec)
     head = [f"Recording: {rec.rel.as_posix()}"]
+    if tags:
+        head.append("Tags: " + ", ".join(tags))
     summ = read_summary(rec)
     if summ:
         head.append(f"Summary: {summ}")
@@ -132,13 +134,15 @@ def push(cfg: Config, recs, log=print, cancel=None) -> tuple[int, int]:
     c = Client(cfg.owui_url, cfg.owui_key)
     state = _load_state()
     kb_state = state.setdefault(cfg.owui_knowledge, {})
+    from .tags import TagStore
+    store = TagStore.load(cfg)
     sent = failed = 0
     for r in recs:
         if cancel is not None and cancel.is_set():
             break
         if not r.txt:
             continue
-        doc = document(r)
+        doc = document(r, store.of(r.rel.as_posix()))
         sig = hashlib.sha1(doc.encode()).hexdigest()
         key = r.rel.as_posix()
         prev = kb_state.get(key)

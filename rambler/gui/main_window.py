@@ -10,9 +10,9 @@ from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSortFilterProxyMo
                             Signal)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QInputDialog, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-                               QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSplitter, QStyle, QTableView,
+                               QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSplitter, QStyle, QTreeView,
                                QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
@@ -27,140 +27,10 @@ from . import theme
 from .player import PlayerPanel, fmt_time
 from .settings import SettingsDialog, set_autostart
 from .. import recorders as R
+from .library_model import (C_COPIES, C_FOLDER, C_MOD, C_NAME, C_SIZE, C_SPK, C_STATUS, C_SUBS, C_SUMM, C_TAGS, COLS,
+                            FilterProxy, LibraryModel, TagChips)
 from .workers import JobContext, Worker
-
-COLS = ["Status", "Recording", "Folder", "Size", "Modified", "Copies", "Subtitles", "Speakers", "Summary"]
-STATUS_COLORS = {
-    "To be transcribed": "pending", "Transcribed (no SRT)": "nosrt", "Transcribed": "done",
-    "Failed": "failed", "Queued": "muted", "Too short": "muted", "Track (mix transcribed)": "muted",
-    "Track (mix pending)": "muted",
-}
-
-
-class LibraryModel(QAbstractTableModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.recs: list[Recording] = []
-        self.overlay: dict[str, str] = {}      # rel -> transient status (Queued, Transcribing 40%, Failed)
-        self.n_audio_dirs = 0
-        self.info: dict[str, tuple[str, str]] = {}   # rel -> (summary, speakers), from the search index
-
-    def set_info(self, info):
-        self.info = info
-        if self.recs:
-            self.dataChanged.emit(self.index(0, 7), self.index(len(self.recs) - 1, 8))
-
-    def set_recs(self, recs, n_audio_dirs):
-        self.beginResetModel()
-        self.recs = recs
-        self.n_audio_dirs = n_audio_dirs
-        # A failure stays visible across rescans, but only while the recording still has no transcript.
-        # Anything that later produces one (a retry, another tool) clears it.
-        done = {r.rel.as_posix() for r in recs if r.transcribed}
-        self.overlay = {k: v for k, v in self.overlay.items() if v.startswith("Failed") and k not in done}
-        self.endResetModel()
-
-    def set_overlay(self, key: str, state: str):
-        if state:
-            self.overlay[key] = state
-        else:
-            self.overlay.pop(key, None)
-        for row, r in enumerate(self.recs):
-            if r.rel.as_posix() == key:
-                self.dataChanged.emit(self.index(row, 0), self.index(row, len(COLS) - 1))
-                break
-
-    def rowCount(self, parent=QModelIndex()):
-        return 0 if parent.isValid() else len(self.recs)
-
-    def columnCount(self, parent=QModelIndex()):
-        return len(COLS)
-
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if orientation == Qt.Horizontal and role == Qt.DisplayRole:
-            return COLS[section]
-        return None
-
-    def status_of(self, r: Recording) -> str:
-        ov = self.overlay.get(r.rel.as_posix())
-        if ov and ov.startswith("Failed") and r.transcribed:
-            return r.status()
-        return ov or r.status()
-
-    def data(self, index, role=Qt.DisplayRole):
-        r = self.recs[index.row()]
-        c = index.column()
-        if role == Qt.UserRole:
-            return r
-        if role == Qt.DisplayRole:
-            if c == 0:
-                return self.status_of(r)
-            if c == 1:
-                return r.name
-            if c == 2:
-                return str(r.rel.parent) if str(r.rel.parent) != "." else ""
-            if c == 3:
-                return human(r.size)
-            if c == 4:
-                return time.strftime("%Y-%m-%d %H:%M", time.localtime(r.mtime))
-            if c == 5:
-                return f"{len(r.locations)}/{self.n_audio_dirs}"
-            if c == 6:
-                return r.srt.suffix.lstrip(".").upper() if r.srt else ""
-            if c == 7:
-                return self.info.get(r.rel.as_posix(), ("", ""))[1]
-            if c == 8:
-                return self.info.get(r.rel.as_posix(), ("", ""))[0].replace("\n", " ")
-        if role == Qt.UserRole + 1:   # sort keys
-            inf = self.info.get(r.rel.as_posix(), ("", ""))
-            return {0: self.status_of(r), 1: r.name.lower(), 2: str(r.rel.parent).lower(), 3: r.size,
-                    4: r.mtime, 5: len(r.locations), 6: bool(r.srt), 7: inf[1].lower(), 8: inf[0].lower()}[c]
-        if role == Qt.ForegroundRole and c == 0:
-            s = self.status_of(r)
-            key = "Failed" if s.startswith("Failed") else s if s in STATUS_COLORS else None
-            if s.startswith("Transcribing") or s.startswith("Decoding") or s.startswith("Loading"):
-                return QBrush(QColor(theme.c("working")))
-            if key:
-                return QBrush(QColor(theme.c(STATUS_COLORS[key])))
-        if role == Qt.ForegroundRole and c == 5 and len(r.locations) < self.n_audio_dirs:
-            return QBrush(QColor(theme.c("pending")))
-        if role == Qt.ToolTipRole and c == 8:
-            summ = self.info.get(r.rel.as_posix(), ("", ""))[0]
-            return summ or None
-        if role == Qt.ToolTipRole:
-            locs = "\n".join(str(l) for l in r.locations)
-            return f"{r.rel}\nOn: \n{locs}\nTranscript: {r.txt or '—'}\nSubtitles: {r.srt or '—'}"
-        if role == Qt.TextAlignmentRole and c in (3, 5):
-            return int(Qt.AlignRight | Qt.AlignVCenter)
-        return None
-
-
-class FilterProxy(QSortFilterProxyModel):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.text = ""
-        self.mode = "all"
-        self.setSortRole(Qt.UserRole + 1)
-
-    def set_filter(self, text, mode):
-        self.text, self.mode = text.lower(), mode
-        self.invalidateFilter()
-
-    def filterAcceptsRow(self, row, parent):
-        r: Recording = self.sourceModel().recs[row]
-        if self.text:
-            summ, spk = self.sourceModel().info.get(r.rel.as_posix(), ("", ""))
-            if self.text not in r.rel.as_posix().lower() and self.text not in spk.lower() \
-                    and self.text not in summ.lower():
-                return False
-        if self.mode == "pending":
-            return r.pending
-        if self.mode == "nosrt":
-            return not r.srt
-        if self.mode == "missing":
-            return len(r.locations) < self.sourceModel().n_audio_dirs
-        return True
-
+from ..tags import TagStore
 
 class BgWorker(QThread):
     """Background task outside the main job queue (search indexing, Open WebUI pushes)."""
@@ -254,21 +124,26 @@ class MainWindow(QMainWindow):
         self.model = LibraryModel(self)
         self.proxy = FilterProxy(self)
         self.proxy.setSourceModel(self.model)
-        self.table = QTableView()
+        self.model.grouped = self.cfg.group_takes
+        self.table = QTreeView()
         self.table.setModel(self.proxy)
         self.table.setSortingEnabled(True)
-        self.table.sortByColumn(4, Qt.DescendingOrder)
+        self.table.sortByColumn(C_MOD, Qt.DescendingOrder)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.verticalHeader().hide()
         self.table.setAlternatingRowColors(True)
-        self.table.setShowGrid(False)
+        self.table.setUniformRowHeights(True)
         self.table.setWordWrap(False)
-        hh = self.table.horizontalHeader()
+        self.table.setRootIsDecorated(self.cfg.group_takes)
+        self.table.setExpandsOnDoubleClick(False)       # double-click plays; the arrow expands
+        self.table.setItemDelegateForColumn(C_TAGS, TagChips(self.model, self.table))
+        hh = self.table.header()
         hh.setSectionResizeMode(QHeaderView.Interactive)
-        hh.setSectionResizeMode(8, QHeaderView.Stretch)
-        for col, w in ((0, 150), (1, 200), (2, 70), (3, 75), (4, 125), (5, 55), (6, 65), (7, 110)):
+        hh.setSectionResizeMode(C_SUMM, QHeaderView.Stretch)
+        hh.setStretchLastSection(True)
+        for col, w in ((C_STATUS, 195), (C_NAME, 200), (C_TAGS, 110), (C_FOLDER, 60), (C_SIZE, 75), (C_MOD, 125),
+                       (C_COPIES, 55), (C_SUBS, 65), (C_SPK, 100)):
             self.table.setColumnWidth(col, w)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
@@ -276,14 +151,25 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(lambda i: self._on_current(i, None, autoplay=True))
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter by name, folder, speaker or summary…")
+        self.search.setPlaceholderText("Filter by name, folder, tag, speaker or summary…")
         self.search.setClearButtonEnabled(True)
         self.show_mode = QComboBox()
         for label, mode in (("All recordings", "all"), ("To be transcribed", "pending"),
                             ("Missing subtitles", "nosrt"), ("Not on every drive", "missing")):
             self.show_mode.addItem(label, mode)
+        self.tag_filter = QComboBox()
+        self.tag_filter.setMinimumWidth(120)
+        self.tag_filter.setToolTip("Show only recordings with this tag")
+        self.btn_tags = QPushButton("Tags…")
+        self.btn_tags.setToolTip("Create, rename, recolour or delete tags")
+        self.btn_tags.clicked.connect(self.manage_tags)
+        self.chk_group = QCheckBox("Group takes")
+        self.chk_group.setToolTip("Nest multitrack tracks and backups under the take's mix")
+        self.chk_group.setChecked(self.cfg.group_takes)
+        self.chk_group.toggled.connect(self._set_grouped)
         self.search.textChanged.connect(self._apply_filter)
         self.show_mode.currentIndexChanged.connect(self._apply_filter)
+        self.tag_filter.currentIndexChanged.connect(self._apply_filter)
         self.counts = QLabel()
 
         lib = QWidget()
@@ -292,6 +178,9 @@ class MainWindow(QMainWindow):
         fr = QHBoxLayout()
         fr.addWidget(self.search, 1)
         fr.addWidget(self.show_mode)
+        fr.addWidget(self.tag_filter)
+        fr.addWidget(self.btn_tags)
+        fr.addWidget(self.chk_group)
         ll.addLayout(fr)
         ll.addWidget(self.table, 1)
         ll.addWidget(self.counts)
@@ -382,6 +271,7 @@ class MainWindow(QMainWindow):
         self.chk_srt.toggled.connect(self._srt_toggled)
 
         self._bg: set = set()
+        self.tags = TagStore()
         self._player_rec = None
         try:
             from PySide6.QtGui import QGuiApplication
@@ -719,8 +609,26 @@ class MainWindow(QMainWindow):
             self.job_detail.setText("Cancelling…")
 
     def selected(self) -> list[Recording]:
-        rows = {self.proxy.mapToSource(i).row() for i in self.table.selectionModel().selectedRows()}
-        return [self.model.recs[r] for r in sorted(rows)]
+        out = []
+        for i in self.table.selectionModel().selectedRows(0):
+            r = self.model.rec_at(self.proxy.mapToSource(i))
+            if r is not None and r not in out:
+                out.append(r)
+        return out
+
+    def _select_rel(self, rel) -> bool:
+        """Make this recording the current row (expanding its take), without reloading the player."""
+        src = self.model.index_of(rel)
+        idx = self.proxy.mapFromSource(src)
+        if not idx.isValid():
+            return False
+        if idx.parent().isValid():
+            self.table.expand(idx.parent())
+        self.table.selectionModel().blockSignals(True)
+        self.table.setCurrentIndex(idx)
+        self.table.selectionModel().blockSignals(False)
+        self.table.scrollTo(idx)
+        return True
 
     # ================================================================ scan
     def start_scan(self, then=None):
@@ -734,6 +642,7 @@ class MainWindow(QMainWindow):
             cur = self._current_rec()
             self.model.set_recs(recs, len(self.cfg.audio_roots()))
             self.model.set_info(self.index.doc_info())
+            self._load_tags()
             QTimer.singleShot(0, self.start_indexing)
             self._update_counts()
             if cur:
@@ -752,7 +661,19 @@ class MainWindow(QMainWindow):
         self.act_trans.setText(f"Transcribe new ({pending})" if pending else "Transcribe new")
 
     def _apply_filter(self):
-        self.proxy.set_filter(self.search.text(), self.show_mode.currentData())
+        self.proxy.set_filter(self.search.text(), self.show_mode.currentData(), self.tag_filter.currentData() or "")
+        if self.model.grouped and (self.search.text() or self.tag_filter.currentData()
+                                   or self.show_mode.currentData() != "all"):
+            self.table.expandAll()                   # show which track matched
+
+    def _set_grouped(self, on: bool):
+        cur = self._current_rec()
+        self.cfg.group_takes = on
+        self.cfg.save()
+        self.model.set_grouped(on)
+        self.table.setRootIsDecorated(on)
+        if cur:
+            self._select_rel(cur.rel)
 
     # ================================================================ transcription
     def transcribe(self, recs: list[Recording], want_srt: bool | None = None, force=False, then=None):
@@ -1074,8 +995,12 @@ class MainWindow(QMainWindow):
         self.q_speaker = QComboBox()
         self.q_speaker.addItem("Any speaker", "")
         self.q_speaker.setMinimumWidth(140)
+        self.q_tag = QComboBox()
+        self.q_tag.addItem("Any tag", "")
+        self.q_tag.setMinimumWidth(110)
         row.addWidget(self.q, 1)
         row.addWidget(self.q_speaker)
+        row.addWidget(self.q_tag)
         lay.addLayout(row)
         self.results = QTreeWidget()
         self.results.setRootIsDecorated(False)
@@ -1095,6 +1020,7 @@ class MainWindow(QMainWindow):
         self._q_timer.timeout.connect(self._run_search)
         self.q.textChanged.connect(lambda: self._q_timer.start())
         self.q_speaker.currentIndexChanged.connect(self._run_search)
+        self.q_tag.currentIndexChanged.connect(self._run_search)
         return w
 
     def start_indexing(self):
@@ -1141,10 +1067,19 @@ class MainWindow(QMainWindow):
     def _run_search(self):
         q, spk = self.q.text(), self.q_speaker.currentData() or ""
         self.results.clear()
+        tag = self.q_tag.currentData() or ""
         if not q.strip() and not spk:
-            self.search_status.setText(f"{len(self.model.info)} transcripts searchable.")
+            if tag:
+                n = len(self.tags.recordings_with(tag))
+                self.search_status.setText(f"Type words to search the {n} recording(s) tagged '{tag}'. "
+                                           "To list them, pick the tag in the Library's filter.")
+            else:
+                self.search_status.setText(f"{len(self.model.info)} transcripts searchable.")
             return
-        hits = self.index.search(q, spk)
+        hits = self.index.search(q, spk, limit=5000 if tag else 500)
+        if tag:
+            keep = self.tags.recordings_with(tag)
+            hits = [h for h in hits if h.rel in keep][:500]
         by_rel = {r.rel.as_posix(): r for r in self.model.recs}
         for h in hits:
             name = by_rel[h.rel].name if h.rel in by_rel else h.rel
@@ -1164,14 +1099,9 @@ class MainWindow(QMainWindow):
 
     def _open_hit(self, item, _col=0):
         rel, start = item.data(0, Qt.UserRole)
-        for row, r in enumerate(self.model.recs):
+        for r in self.model.recs:
             if r.rel.as_posix() == rel:
-                idx = self.proxy.mapFromSource(self.model.index(row, 0))
-                if idx.isValid():
-                    self.table.selectionModel().blockSignals(True)
-                    self.table.setCurrentIndex(idx)
-                    self.table.selectionModel().blockSignals(False)
-                    self.table.scrollTo(idx)
+                self._select_rel(rel)
                 if getattr(self, "_player_rec", None) is not r:
                     self._load_player(r)
                 self.player.seek_seconds(start)
@@ -1268,29 +1198,103 @@ class MainWindow(QMainWindow):
         self.player.restyle()
         if hasattr(self, "results") and self.results.topLevelItemCount():
             self._run_search()
-        if self.model.recs:
-            self.model.dataChanged.emit(self.model.index(0, 0), self.model.index(len(self.model.recs) - 1, 0))
+        self.model.refresh()
 
     def _system_scheme_changed(self, *_):
         if self.cfg.theme == "system":
             self.apply_theme()
+
+
+    # ================================================================ tags
+    def _load_tags(self):
+        self.tags = TagStore.load(self.cfg)
+        self.model.set_tags(self.tags)
+        self._refresh_tag_filter()
+        self.proxy.invalidateFilter()
+
+    def _save_tags(self) -> bool:
+        try:
+            self.tags.save(self.cfg)
+        except (OSError, RuntimeError) as e:
+            QMessageBox.warning(self, APP_NAME, f"Couldn't save tags:\n{e}")
+            return False
+        self.model.set_tags(self.tags)
+        self._refresh_tag_filter()
+        self.proxy.invalidateFilter()
+        return True
+
+    def _refresh_tag_filter(self):
+        from .library_model import _dot
+        cur = self.tag_filter.currentData()
+        self.tag_filter.blockSignals(True)
+        self.tag_filter.clear()
+        self.tag_filter.addItem("All tags", "")
+        for t in self.tags.names():
+            self.tag_filter.addItem(_dot(self.tags.color(t)), t, t)
+        if self.tags.names():
+            self.tag_filter.addItem("Untagged", "\0untagged")
+        i = self.tag_filter.findData(cur)
+        self.tag_filter.setCurrentIndex(max(0, i))
+        self.tag_filter.blockSignals(False)
+        if hasattr(self, "q_tag"):
+            cur = self.q_tag.currentData()
+            self.q_tag.blockSignals(True)
+            self.q_tag.clear()
+            self.q_tag.addItem("Any tag", "")
+            for t in self.tags.names():
+                self.q_tag.addItem(_dot(self.tags.color(t)), t, t)
+            self.q_tag.setCurrentIndex(max(0, self.q_tag.findData(cur)))
+            self.q_tag.blockSignals(False)
+
+    def _tag_menu(self, menu: QMenu):
+        from .library_model import _dot
+        recs = self.selected() or ([self._current_rec()] if self._current_rec() else [])
+        rels = [r.rel.as_posix() for r in recs]
+        n = len(rels)
+        for t in self.tags.names():
+            a = menu.addAction(_dot(self.tags.color(t)), t)
+            a.setCheckable(True)
+            have = sum(1 for rel in rels if t in self.tags.of(rel))
+            a.setChecked(have == n and n > 0)
+            if 0 < have < n:
+                a.setText(f"{t}  (some)")
+            a.toggled.connect(lambda on, t=t: self._tag(rels, t, on))
+        if self.tags.names():
+            menu.addSeparator()
+        menu.addAction("New tag…", lambda: self._new_tag(rels))
+        menu.addAction("Manage tags…", self.manage_tags)
+
+    def _tag(self, rels, tag, on):
+        self.tags.assign(rels, tag, on)
+        self._save_tags()
+
+    def _new_tag(self, rels=None):
+        name, ok = QInputDialog.getText(self, "New tag", "Tag name (e.g. Work, Personal):")
+        if not ok or not name.strip():
+            return
+        tag = self.tags.create(name)
+        if rels:
+            self.tags.assign(rels, tag, True)
+        self._save_tags()
+
+    def manage_tags(self):
+        from .tag_dialog import TagDialog
+        dlg = TagDialog(self.tags, self)
+        if dlg.exec() == QDialog.Accepted:
+            self.tags = dlg.result_store
+            self._save_tags()
 
     # ================================================================ player / selection
     def _current_rec(self) -> Recording | None:
         idx = self.table.currentIndex()
         if not idx.isValid():
             return None
-        return self.model.recs[self.proxy.mapToSource(idx).row()]
+        return self.model.rec_at(self.proxy.mapToSource(idx))
 
     def _reselect(self, rel: PurePosixPath):
-        for row, r in enumerate(self.model.recs):
+        for r in self.model.recs:
             if r.rel == rel:
-                idx = self.proxy.mapFromSource(self.model.index(row, 0))
-                if idx.isValid():
-                    self.table.selectionModel().blockSignals(True)
-                    self.table.setCurrentIndex(idx)
-                    self.table.selectionModel().blockSignals(False)
-                    self.table.scrollTo(idx)
+                if self._select_rel(rel):
                     # refresh transcript panel if it changed, without interrupting playback of the same file
                     same = self.player.screen.title.text() == str(r.rel)
                     if same:
@@ -1304,7 +1308,9 @@ class MainWindow(QMainWindow):
     def _on_current(self, cur, prev, autoplay=False):
         if not cur.isValid():
             return
-        self._load_player(self.model.recs[self.proxy.mapToSource(cur).row()], autoplay)
+        r = self.model.rec_at(self.proxy.mapToSource(cur))
+        if r is not None:
+            self._load_player(r, autoplay)
 
     def _load_player(self, r: Recording, autoplay=False, keep_position=False):
         src = next((loc / r.rel for loc in r.locations if (loc / r.rel).exists()), None)
@@ -1320,6 +1326,8 @@ class MainWindow(QMainWindow):
         m.addAction("Play", lambda: self._load_player(r, True))
         m.addAction("Transcribe selected", lambda: self.transcribe(self.selected(), force=True))
         m.addAction("Transcribe selected (with SRT)", lambda: self.transcribe(self.selected(), want_srt=True, force=True))
+        m.addSeparator()
+        self._tag_menu(m.addMenu("Tags"))
         m.addSeparator()
         m.addAction("Open containing folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(r.source.parent))))
         if r.txt:

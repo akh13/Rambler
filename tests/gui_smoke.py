@@ -82,7 +82,7 @@ assert all(r.srt for r in w.model.recs), "missing srt"
 assert all(len(r.locations) == 2 for r in w.model.recs), "not synced"
 assert sorted(p.name for p in T2.iterdir()) == sorted(p.name for p in T1.iterdir())
 
-w.table.selectRow(1)
+w.table.setCurrentIndex(w.proxy.index(1, 0))
 app.processEvents()
 w.player.player.play()
 t0 = time.time()
@@ -265,4 +265,66 @@ w.start_scan()
 wait_idle()
 assert victim.rel.as_posix() not in w.model.overlay
 print("stale failed ok")
+
+# ---- multitrack takes nest under their mix; the toggle flattens them
+for part, secs in (("MIX", 5), ("1-2", 5), ("3-4", 5)):
+    tone(A / f"261121_0009_{part}.wav", secs)
+w.start_scan()
+wait_idle()
+mix_idx = w.proxy.mapFromSource(w.model.index_of("261121_0009_MIX.wav"))
+assert mix_idx.isValid() and not mix_idx.parent().isValid()
+assert w.proxy.rowCount(mix_idx) == 2, w.proxy.rowCount(mix_idx)
+assert "3 files" in w.proxy.data(mix_idx)
+w.table.expand(mix_idx)
+w._select_rel("261121_0009_3-4.wav")
+assert w._current_rec().name == "261121_0009_3-4.wav"
+w.chk_group.setChecked(False)
+assert w.proxy.rowCount(w.proxy.mapFromSource(w.model.index_of("261121_0009_MIX.wav"))) == 0
+assert w._current_rec().name == "261121_0009_3-4.wav"          # selection survives the switch
+w.chk_group.setChecked(True)
+assert w.cfg.group_takes and Config.load().group_takes
+
+# ---- tags: create, assign to several, filter, chips, saved to every transcript drive
+from rambler.tags import FILE  # noqa: E402
+w.tags.create("Work", "#3b82f6")
+w.tags.create("Personal", "#22c55e")
+w._save_tags()
+rels = ["261115_0001.wav", "261114_0001.wav"]
+w._tag(rels, "Work", True)
+w._tag(["261114_0001.wav", "261121_0009_MIX.wav"], "Personal", True)
+assert (T1 / FILE).exists() and (T2 / FILE).read_text() == (T1 / FILE).read_text()
+w.tag_filter.setCurrentIndex(w.tag_filter.findData("Work"))
+app.processEvents()
+shown = []
+for row in range(w.proxy.rowCount()):
+    shown.append(w.model.rec_at(w.proxy.mapToSource(w.proxy.index(row, 0))).name)
+assert sorted(shown) == sorted(rels), shown
+w.tag_filter.setCurrentIndex(w.tag_filter.findData("\0untagged"))
+app.processEvents()
+assert all(not w.tags.of(w.model.rec_at(w.proxy.mapToSource(w.proxy.index(r, 0))).rel.as_posix())
+           for r in range(w.proxy.rowCount()))
+w.tag_filter.setCurrentIndex(0)
+w.search.setText("personal")                                   # free-text filter matches tag names
+app.processEvents()
+assert {w.model.rec_at(w.proxy.mapToSource(w.proxy.index(r, 0))).name for r in range(w.proxy.rowCount())} \
+    == {"261114_0001.wav", "261121_0009_MIX.wav"}
+w.search.setText("")
+w.start_scan()                                                 # tags survive a rescan (read back from disk)
+wait_idle()
+assert w.tags.of("261114_0001.wav") == ["Work", "Personal"]
+w._select_rel("261121_0009_MIX.wav")
+w.table.expand(w.proxy.mapFromSource(w.model.index_of("261121_0009_MIX.wav")))
+for mode in ("dark", "light"):
+    w.cfg.theme = mode
+    w.apply_theme()
+    app.processEvents()
+    w.grab().save(str(out_dir / f"rambler-9-tags-{mode}.png"))
+from rambler.gui.tag_dialog import TagDialog  # noqa: E402
+td = TagDialog(w.tags, w)
+td.show()
+app.processEvents()
+td.grab().save(str(out_dir / "rambler-10-tagdialog.png"))
+assert td.list.count() == 2
+td.close()
+print("groups and tags ok")
 w.close()
