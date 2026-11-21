@@ -409,3 +409,14 @@ def test_openwebui_push(tmp_path, env, monkeypatch):
     assert openwebui.push(cfg, scan(cfg), log=lambda m: None) == (1, 0)    # changed: new file, old removed
     assert ("POST", "/api/v1/knowledge/kb-uuid-1/file/remove", b'{"file_id": "file-1"}') in calls
     srv.shutdown()
+
+
+def test_shaky_rule():
+    from rambler.transcript import Segment, Word
+    long = [Word(f" w{i}", i, i + 1, 0.95) for i in range(74)]
+    long[10].p = 0.2                       # one unsure word in a long line: not shaky
+    assert not Segment(0, 74, "x", long, -0.15).shaky
+    for i in range(0, 74, 6):              # >10% unsure: shaky
+        long[i].p = 0.3
+    assert Segment(0, 74, "x", long, -0.15).shaky
+    assert Segment(0, 1, "x", [], -0.9).shaky and not Segment(0, 1, "x", [], -0.3).shaky

@@ -511,8 +511,16 @@ class PlayerPanel(QWidget):
                if seg.speaker else "")
         if not seg.words:
             return spk + html.escape(seg.text)
-        out = []
-        for k, w in enumerate(seg.words):
+        # long segments (journal ones run ~70 words) show as a moving window of ~14 words
+        size = 14
+        start = 0
+        if len(seg.words) > size + 4:
+            start = (max(wi, 0) // size) * size
+            if len(seg.words) - start < 5:          # don't strand a few words on their own
+                start = max(0, len(seg.words) - size)
+        out = ["…"] if start else []
+        end = start + size if len(seg.words) > size + 4 else len(seg.words)
+        for k, w in list(enumerate(seg.words))[start:end]:
             txt = html.escape(w.w.strip())
             style = []
             if k == wi:
@@ -522,6 +530,8 @@ class PlayerPanel(QWidget):
             if self.show_confidence and w.uncertain and not seg.edited:
                 style.append("text-decoration: underline; color:#ffb74d" if k != wi else "text-decoration: underline")
             out.append(f"<span style='{';'.join(style)}'>{txt}</span>" if style else txt)
+        if end < len(seg.words):
+            out.append("…")
         return spk + " ".join(out)
 
     # ------------------------------------------------------------ live visualizer

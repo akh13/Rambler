@@ -15,7 +15,9 @@ from pathlib import Path
 from . import srt as srtmod
 
 LOW_WORD_P = 0.5          # word probability below this is "Whisper wasn't sure"
-LOW_SEG_LOGPROB = -1.0    # segment average log-probability below this is a shaky segment
+LOW_SEG_LOGPROB = -0.6    # segment average log-probability below this is a shaky segment
+LOW_SEG_FRACTION = 0.10   # ...or when more than this share of its words are unsure
+# (on ~13k real journal segments these flag about 3-4% of lines; "any unsure word" flagged 78%)
 
 
 @dataclass
@@ -47,7 +49,9 @@ class Segment:
 
     @property
     def shaky(self) -> bool:
-        return (self.logprob is not None and self.logprob < LOW_SEG_LOGPROB) or bool(self.uncertain_words)
+        if self.logprob is not None and self.logprob < LOW_SEG_LOGPROB:
+            return True
+        return bool(self.words) and len(self.uncertain_words) / len(self.words) > LOW_SEG_FRACTION
 
     def word_at(self, t: float) -> int:
         for i, w in enumerate(self.words):
