@@ -9,7 +9,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg libegl1 libxkbcommon0 libxcb-cursor0
-      - run: pip install . pytest
+      - run: pip install . pytest faster-whisper    # latest releases, on purpose: catch upstream breakage early
       - run: python -m pytest -q tests
       - run: QT_QPA_PLATFORM=offscreen QT_AUDIO_BACKEND=alsa python tests/gui_smoke.py /tmp
 

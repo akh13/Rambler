@@ -66,15 +66,36 @@ def main():
             emit(event="error", msg=f"{type(e).__name__}: {e}")
 
 
+def decode(path: str):
+    """Decode to 16 kHz mono float32 with ffmpeg, so faster-whisper never touches PyAV.
+
+    faster-whisper's own decoder calls PyAV with arguments newer PyAV releases removed
+    (av 19 + faster-whisper 1.2.1: "open() got an unexpected keyword argument 'metadata_errors'").
+    Handing it samples instead of a path sidesteps PyAV entirely, whatever versions are installed.
+    """
+    import shutil
+    import subprocess
+    import numpy as np
+    exe = shutil.which("ffmpeg")
+    if not exe:
+        raise RuntimeError("ffmpeg not found (install it with your package manager)")
+    r = subprocess.run([exe, "-nostdin", "-v", "error", "-i", path, "-ac", "1", "-ar", "16000",
+                        "-f", "f32le", "-"], capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"ffmpeg could not decode {path}: {r.stderr.decode(errors='replace')[-300:]}")
+    return np.frombuffer(r.stdout, dtype=np.float32)
+
+
 def transcribe(pipe, path: str, o: dict) -> dict:
     batch = int(o.get("batch", 8)) if o.get("device") == "cuda" else 1
+    audio = decode(path)
     lang = o.get("language") or None
     if lang == "auto":
         lang = None
     while True:
         try:
             segs, info = pipe.transcribe(
-                path, language=lang, beam_size=int(o.get("beam", 5)), batch_size=batch,
+                audio, language=lang, beam_size=int(o.get("beam", 5)), batch_size=batch,
                 vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=int(o.get("vad_min_silence_ms", 800)),
                                     speech_pad_ms=int(o.get("vad_speech_pad_ms", 200))),
