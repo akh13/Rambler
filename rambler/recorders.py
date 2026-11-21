@@ -62,21 +62,68 @@ class Mount:
     fstype: str
 
 
-def list_mounts() -> list[Mount]:
-    """Removable-looking mounts (under /media or /run/media)."""
+def _unescape_mount(s: str) -> str:
+    """mountinfo escapes space, tab, newline and backslash as octal (\\040 etc.)."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), s)
+
+
+def _disk_links(kind: str) -> dict[str, str]:
+    """/dev/disk/by-label or by-uuid as {real device path: name}."""
+    out = {}
+    base = Path("/dev/disk") / kind
+    try:
+        for link in base.iterdir():
+            name = link.name.encode().decode("unicode_escape")   # udev writes "My\x20Card"
+            out[os.path.realpath(link)] = name
+    except OSError:
+        pass
+    return out
+
+
+def _removable_target(t: str) -> bool:
+    return t.startswith("/media/") or t.startswith("/run/media/")
+
+
+def list_mounts(mountinfo: str | None = None, labels: dict | None = None, uuids: dict | None = None,
+                use_findmnt: bool = True) -> list[Mount]:
+    """Removable-looking mounts (under /media or /run/media), read straight from the kernel."""
+    labels = _disk_links("by-label") if labels is None else labels
+    uuids = _disk_links("by-uuid") if uuids is None else uuids
+    mounts: dict[str, Mount] = {}
+    if mountinfo is None:
+        try:
+            mountinfo = Path("/proc/self/mountinfo").read_text()
+        except OSError:
+            mountinfo = ""
+    lines = mountinfo.splitlines()
+    for line in lines:
+        pre, _, post = line.partition(" - ")
+        f, g = pre.split(), post.split()
+        if len(f) < 5 or len(g) < 2:
+            continue
+        target = _unescape_mount(f[4])
+        if not _removable_target(target):
+            continue
+        fstype, source = g[0], _unescape_mount(g[1])
+        real = os.path.realpath(source) if source.startswith("/dev/") else source
+        mounts[target] = Mount(Path(target), source, uuids.get(real, ""), labels.get(real, ""), fstype)
+    # findmnt fills in labels/UUIDs udev didn't publish (and covers kernels without /proc access)
+    if not use_findmnt:
+        return sorted(mounts.values(), key=lambda m: str(m.target))
     try:
         out = subprocess.run(["findmnt", "-J", "-l", "-o", "TARGET,SOURCE,UUID,LABEL,FSTYPE"],
                              capture_output=True, text=True, timeout=10).stdout
-        rows = json.loads(out).get("filesystems", [])
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
-        return []
-    mounts = []
-    for r in rows:
-        t = r.get("target") or ""
-        if t.startswith("/media/") or t.startswith("/run/media/"):
-            mounts.append(Mount(Path(t), r.get("source") or "", r.get("uuid") or "", r.get("label") or "",
-                                r.get("fstype") or ""))
-    return mounts
+        for r in json.loads(out).get("filesystems", []):
+            t = r.get("target") or ""
+            if not _removable_target(t):
+                continue
+            m = mounts.get(t) or Mount(Path(t), r.get("source") or "", "", "", r.get("fstype") or "")
+            m.uuid = m.uuid or r.get("uuid") or ""
+            m.label = m.label or r.get("label") or ""
+            mounts[t] = m
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError, ValueError):
+        pass
+    return sorted(mounts.values(), key=lambda m: str(m.target))
 
 
 def recorders(cfg: Config) -> list[Recorder]:
@@ -92,7 +139,8 @@ def match(rec: Recorder, mounts: list[Mount]) -> Mount | None:
                 return m
     if rec.label:
         for m in mounts:
-            if m.label == rec.label or (not m.label and m.target.name == rec.label):
+            # udisks names the mount folder after the label, so the folder name is a fallback
+            if m.label == rec.label or m.target.name == rec.label:
                 return m
     return None
 

@@ -314,6 +314,8 @@ class MainWindow(QMainWindow):
         self.act_setup.triggered.connect(self.open_engine_setup)
         self.act_import.triggered.connect(lambda: [self.import_from_recorder(r, m) for r, m in self._recorders_now[:1]])
         self._recorders_now: list = []
+        self._rec_state: dict[str, tuple[str, str]] = {}   # name -> (state, detail)
+        self._rec_unplugged: set[str] = set()
         self._handled_recorders: set[str] = set()
         self.chk_srt.toggled.connect(self._srt_toggled)
 
@@ -407,6 +409,26 @@ class MainWindow(QMainWindow):
                     ("background: #e3f1e5; color: #1b5e20;" if ok else "background: #eee; color: #888; "
                      "text-decoration: line-through;"))
                 self.drive_bar.addWidget(lab)
+        styles = {
+            "absent": ("", "background: #eee; color: #888;"),
+            "connected": (" · connected", "background: #e3f1e5; color: #1b5e20; font-weight: 600;"),
+            "importing": (" · working…", "background: #e3edf9; color: #0d47a1; font-weight: 600;"),
+            "done": (" · ✓ safe to switch back", "background: #e3f1e5; color: #1b5e20;"),
+            "error": (" · problem, see Log", "background: #fdecea; color: #b71c1c;"),
+        }
+        for rec in R.recorders(self.cfg):
+            if not rec.enabled:
+                continue
+            state, detail = self._rec_state.get(rec.name, ("absent", ""))
+            suffix, style = styles[state]
+            lab = QLabel(f"📼 {rec.name}{suffix}")
+            tips = {"absent": f"Not connected. Plug it in and switch it to card reader mode "
+                              f"(looking for a card labelled '{rec.label}').",
+                    "connected": "Card detected.", "importing": "Importing, transcribing and syncing.",
+                    "done": "Finished and unmounted.", "error": "Something went wrong."}
+            lab.setToolTip(tips[state] + (f"\n{detail}" if detail else ""))
+            lab.setStyleSheet("padding: 2px 8px; border-radius: 9px; " + style)
+            self.drive_bar.addWidget(lab)
         self.drive_bar.addStretch(1)
 
     def _poll_drives(self):
@@ -424,9 +446,28 @@ class MainWindow(QMainWindow):
             self.start_scan()
 
     # ================================================================ recorders
+    def _set_rec_state(self, name: str, state: str, detail: str = ""):
+        if self._rec_state.get(name) != (state, detail):
+            self._rec_state[name] = (state, detail)
+            self._refresh_drive_bar()
+
     def _poll_recorders(self):
         conns = R.connected(self.cfg)
         self._recorders_now = conns
+        seen = {r.name: m for r, m in conns}
+        for rec in R.recorders(self.cfg):
+            state = self._rec_state.get(rec.name, ("absent", ""))[0]
+            m = seen.get(rec.name)
+            if m is None:
+                if state in ("connected", "error"):
+                    self._set_rec_state(rec.name, "absent")
+                elif state == "done":
+                    self._rec_unplugged.add(rec.name)    # keep the "safe to switch back" chip until next time
+            elif state == "absent" or (state in ("done", "error") and rec.name in self._rec_unplugged):
+                self._rec_unplugged.discard(rec.name)
+                self.log(f"{rec.name} detected at {m.target} (label {m.label or '?'}, {m.fstype or '?'}, "
+                         f"{m.source or '?'})")
+                self._set_rec_state(rec.name, "connected", str(m.target))
         present = {f"{r.name}|{m.source}|{m.target}" for r, m in conns}
         self._handled_recorders &= present
         if conns:
@@ -454,6 +495,7 @@ class MainWindow(QMainWindow):
                 return
         cfg = self.cfg
         self._handled_recorders.add(f"{rec.name}|{mount.source}|{mount.target}")
+        self._set_rec_state(rec.name, "importing", str(mount.target))
         if self.isMinimized():
             self._notify(APP_NAME, f"{rec.name} connected, importing new recordings…")
 
@@ -469,6 +511,8 @@ class MainWindow(QMainWindow):
                 return R.unmount(mount, ctx.log)
 
             def unmounted(ok):
+                self._set_rec_state(rec.name, "done" if ok else "connected",
+                                    f"{n_imported} new recording(s) this time")
                 self._notify(APP_NAME, f"{rec.name}: {n_imported} new recording(s) imported, transcribed and synced."
                              + (" Card unmounted, safe to switch the recorder back." if ok else ""))
             if rec.unmount_after:
@@ -489,7 +533,9 @@ class MainWindow(QMainWindow):
                 else:
                     after()
             self.start_scan(then=after_scan)
-        self.run_job(f"Importing from {rec.name}", job, imported)
+        self.run_job(f"Importing from {rec.name}", job, imported,
+                     on_fail=lambda e: (self._set_rec_state(rec.name, "error", e),
+                                        QMessageBox.warning(self, APP_NAME, f"Import from {rec.name} failed:\n{e}")))
 
     # ================================================================ job plumbing
     def busy(self) -> bool:

@@ -114,6 +114,7 @@ rambler status -v                 # folders, engine, what's pending
 rambler transcribe --sync         # transcribe everything pending, then sync
 rambler transcribe --backfill-srt # also redo transcripts that have no SRT
 rambler sync --dry-run
+rambler recorders                 # what's plugged in, and which recorder it matches
 rambler import                    # pull from a connected recorder now, transcribe, sync, unmount
 rambler watch                     # stay running and do all of the above whenever a card or drive appears
 ```

@@ -108,6 +108,9 @@ R.LEDGER = tmp / "ledger.json"
 R.list_mounts = lambda: [R.Mount(card, "/dev/sdz1", "1234-ABCD", "X8", "exfat")]
 R.unmount = lambda m, log: (unmounted.append(m), log("unmounted (test)"), True)[-1]
 w._poll_drives()
+chip_texts = lambda: [w.drive_bar.itemAt(i).widget().text() for i in range(w.drive_bar.count())
+                      if w.drive_bar.itemAt(i).widget()]
+print("chips while working:", [c for c in chip_texts() if "TASCAM" in c])
 for _ in range(6):
     wait_idle()
 names = {r.rel.as_posix(): r for r in w.model.recs}
@@ -116,6 +119,10 @@ print("x8:", x8 and (x8.status(), len(x8.locations)), "unmounted:", bool(unmount
 assert x8 and x8.srt and len(x8.locations) == 2 and unmounted
 assert (B / "2026" / "261121_0001.wav").exists() and (T2 / "2026" / "261121_0001.srt").exists()
 w.grab().save(str(out_dir / "rambler-4-x8.png"))
+for _ in range(3):
+    app.processEvents()
+print("chips after:", [c for c in chip_texts() if "TASCAM" in c])
+assert any("safe to switch back" in c for c in chip_texts())
 w._poll_drives()   # still mounted: must not re-trigger
 assert not w.busy()
 print("log tail:\n" + "\n".join(w.logview.toPlainText().splitlines()[-14:]))
@@ -128,5 +135,13 @@ d.show()
 app.processEvents()
 d.grab().save(str(out_dir / "rambler-5-recorders.png"))
 assert d.collect().recorders[0]["label"] == "X8"
+tabs = d.findChild(QTabWidget)
+tabs.setCurrentIndex(1)
+for eng in ("whisper.cpp", "faster-whisper"):
+    d.engine.setCurrentIndex(d.engine.findData(eng))
+    app.processEvents()
+    assert d._tf.isRowVisible(d.hotwords) == (eng == "faster-whisper")
+    assert d._tf.isRowVisible(d.extra) == (eng == "whisper.cpp")
+    d.grab().save(str(out_dir / f"rambler-6-settings-{eng}.png"))
 d.close()
 w.close()

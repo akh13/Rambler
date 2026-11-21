@@ -217,3 +217,24 @@ def test_silent_recording_still_gets_empty_srt(env):
     write_outputs(cfg, rec, Result("\n", "", "en", "large-v3", "faster-whisper", 2.0))
     assert rec.srt is not None and rec.srt.read_text() == ""
     assert scan(cfg)[0].status() == "Transcribed"
+
+
+def test_mountinfo_parsing():
+    from rambler import recorders as R
+    info = (
+        "36 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n"
+        "512 30 8:33 / /media/anna/X8 rw,nosuid,nodev shared:300 - exfat /dev/sdc1 rw,uid=1000\n"
+        "513 30 8:17 / /media/anna/TOSHIBA\\040EXT rw shared:301 - ntfs3 /dev/sdb1 rw\n"
+        "514 30 8:49 / /run/media/anna/NOLABEL rw shared:302 - vfat /dev/sdd1 rw\n"
+    )
+    ms = R.list_mounts(info, labels={"/dev/sdc1": "X8", "/dev/sdb1": "TOSHIBA EXT"},
+                       uuids={"/dev/sdc1": "6A1B-2C3D"}, use_findmnt=False)
+    by = {str(m.target): m for m in ms}
+    assert set(by) == {"/media/anna/X8", "/media/anna/TOSHIBA EXT", "/run/media/anna/NOLABEL"}
+    assert by["/media/anna/X8"].label == "X8" and by["/media/anna/X8"].uuid == "6A1B-2C3D"
+    assert by["/media/anna/X8"].source == "/dev/sdc1" and by["/media/anna/X8"].fstype == "exfat"
+    rec = R.Recorder()
+    assert R.match(rec, ms) is by["/media/anna/X8"]
+    # label unreadable, but udisks named the folder after it
+    ms2 = R.list_mounts(info, labels={}, uuids={}, use_findmnt=False)
+    assert R.match(rec, ms2).target.name == "X8"

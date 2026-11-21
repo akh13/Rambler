@@ -219,6 +219,26 @@ def cmd_import(cfg: Config, args) -> int:
     return rc
 
 
+def cmd_recorders(cfg: Config, args) -> int:
+    """Show what Rambler sees: removable mounts and which configured recorder each one matches."""
+    from . import recorders as R
+    mounts = R.list_mounts()
+    print("Removable volumes mounted:" if mounts else "No removable volumes mounted under /media or /run/media.")
+    for m in mounts:
+        hit = next((r.name for r in R.recorders(cfg) if R.match(r, [m]) is m), None)
+        print(f"  {m.target}  label={m.label or '-'}  uuid={m.uuid or '-'}  {m.fstype}  {m.source}"
+              + (f"  -> {hit}" if hit else ""))
+    print("Configured recorders:")
+    for r in R.recorders(cfg):
+        m = R.match(r, mounts)
+        where = f"connected at {m.target}" if m else "not connected"
+        print(f"  {r.name}: label={r.label or '-'} uuid={r.uuid or '-'} folder={r.card_subdir or '(whole card)'} "
+              f"-> {where}{'' if r.enabled else ' (disabled)'}")
+        if m:
+            print(f"    {len(R.pending(r, m, cfg))} recording(s) waiting to import")
+    return 0
+
+
 def cmd_watch(cfg: Config, args) -> int:
     """Stay running; act when a recorder card or a configured drive appears."""
     import time
@@ -255,7 +275,7 @@ def make_engine_msg(cfg: Config) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] not in ("status", "sync", "transcribe", "setup", "import", "watch") and not argv[0].startswith("-"):
+    if argv and argv[0] not in ("status", "sync", "transcribe", "setup", "import", "watch", "recorders") and not argv[0].startswith("-"):
         from .gui.app import run          # `rambler file1.mp3 ...` (e.g. "Open with Rambler")
         return run(argv)
     p = argparse.ArgumentParser(prog="rambler", description="Transcribe and sync audio recordings.")
@@ -283,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-n", "--dry-run", action="store_true", help="only list what would be imported")
     s.add_argument("--from", dest="source", help="use this folder as the recorder's card instead of detecting it")
     s.add_argument("--recorder", default="", help="which configured recorder --from refers to (default: first)")
+    sub.add_parser("recorders", help="show detected cards/volumes and which recorder they match")
     s = sub.add_parser("watch", help="run in the background: auto-import recorders, auto-sync drives")
     s.add_argument("--interval", type=float, default=3.0)
     p.add_argument("--minimized", action="store_true", help="start the GUI minimized")
@@ -300,6 +321,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_import(cfg, args)
     if args.cmd == "watch":
         return cmd_watch(cfg, args)
+    if args.cmd == "recorders":
+        return cmd_recorders(cfg, args)
     from .gui.app import run
     return run([], minimized=args.minimized)
 

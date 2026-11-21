@@ -36,6 +36,13 @@ def set_autostart(on: bool) -> None:
                  f"Exec={cmd} --minimized\nX-GNOME-Autostart-enabled=true\nNoDisplay=false\n")
 
 
+def _help(text: str) -> QLabel:
+    lab = QLabel(text)
+    lab.setWordWrap(True)
+    lab.setStyleSheet("color: palette(mid); font-size: 11px;")
+    return lab
+
+
 class FolderList(QWidget):
     def __init__(self, title: str, hint: str, dirs: list[str], parent=None):
         super().__init__(parent)
@@ -130,9 +137,9 @@ class SettingsDialog(QDialog):
         self.threads.setRange(1, 64)
         self.threads.setValue(cfg.threads)
         self.prompt = QLineEdit(cfg.initial_prompt)
-        self.prompt.setPlaceholderText("Optional: names and words whisper should spell right")
+        self.prompt.setPlaceholderText("e.g. A voice journal. Names: Sam, Robyn. Work: Proxmox, Ceph.")
         self.hotwords = QLineEdit(cfg.hotwords)
-        self.hotwords.setPlaceholderText("faster-whisper: names and terms, comma-separated")
+        self.hotwords.setPlaceholderText("e.g. Robyn, Narre Warren, cephadm, pfSense")
         self.batch = QSpinBox()
         self.batch.setRange(1, 32)
         self.batch.setValue(cfg.fw_batch)
@@ -160,7 +167,14 @@ class SettingsDialog(QDialog):
         tf.addRow("Language", self.lang)
         tf.addRow("CPU threads", self.threads)
         tf.addRow("Initial prompt", self.prompt)
+        self.prompt_help = _help("A sentence or two describing the recordings, with the names, places and jargon "
+                                 "Whisper keeps getting wrong. It steers spelling and style. Leave blank if "
+                                 "transcripts already look right.")
+        tf.addRow("", self.prompt_help)
         tf.addRow("Hotwords", self.hotwords)
+        self.hotwords_help = _help("Comma-separated words to listen out for: people's names, places, product "
+                                   "names. Stronger than the prompt for getting a specific spelling right.")
+        tf.addRow("", self.hotwords_help)
         tf.addRow("Batch size", self.batch)
         tf.addRow("whisper.cpp arguments", self.extra)
         tf.addRow("Transcript layout", self.layout_combo)
@@ -168,13 +182,16 @@ class SettingsDialog(QDialog):
         tf.addRow("", self.srt)
         tf.addRow("", self.vad)
         tf.addRow("", self.beside)
-        setup_btn = QPushButton("Set up engine…  (build whisper.cpp, download models)")
+        setup_btn = QPushButton("Set up engine…  (install it and download models)")
         setup_btn.clicked.connect(self._engine_setup)
         tf.addRow("", self.engine_status)
         tf.addRow("", setup_btn)
         tabs.addTab(tw, "Transcription")
         self._fill_models(cfg.model)
+        self._tf = tf
         self.engine.currentIndexChanged.connect(lambda: self._fill_models(self.model.currentData() or "auto"))
+        self.engine.currentIndexChanged.connect(self._engine_rows)
+        self._engine_rows()
         self.models_dir[1].editingFinished.connect(lambda: self._fill_models(self.model.currentData() or "auto"))
 
         # Sync
@@ -236,7 +253,7 @@ class SettingsDialog(QDialog):
         self.r_uuid = QLineEdit()
         self.r_uuid.setPlaceholderText("optional; matched before the label")
         self.r_card = QLineEdit()
-        self.r_card.setPlaceholderText("(whole card)")
+        self.r_card.setPlaceholderText("(whole card)  ·  the X8 keeps recordings in SOUND")
         self.r_dest = QLineEdit()
         self.r_dest.setPlaceholderText("{year} = year from the file name, e.g. 261121_0002 -> 2026")
         self.r_excl = QLineEdit()
@@ -248,6 +265,9 @@ class SettingsDialog(QDialog):
         rf.addRow("Filesystem UUID", self.r_uuid)
         rf.addRow("Folder on card", self.r_card)
         rf.addRow("Import into subfolder", self.r_dest)
+        rf.addRow("", _help("Inside the primary recording folder. {year} becomes the recording's year "
+                            "(taken from names like 261121_0001.wav), e.g. {year} or Field/{year}. "
+                            "Blank puts files at the top."))
         rf.addRow("Skip (globs, comma-sep.)", self.r_excl)
         rf.addRow("", self.r_auto)
         rf.addRow("", self.r_unmount)
@@ -383,6 +403,17 @@ class SettingsDialog(QDialog):
         h.addWidget(e, 1)
         h.addWidget(b)
         return w, e
+
+    def _engine_rows(self):
+        """Only show the settings that apply to the engine in use."""
+        choice = self.engine.currentData()
+        if choice == "auto":
+            choice = make_engine(self.collect()).name
+        fw = choice == "faster-whisper"
+        for w in (self.bin[0], self.models_dir[0], self.extra, self.vad):
+            self._tf.setRowVisible(w, not fw)
+        for w in (self.hotwords, self.hotwords_help, self.batch):
+            self._tf.setRowVisible(w, fw)
 
     def _fill_models(self, current: str):
         tmp = self.collect()
