@@ -1,7 +1,7 @@
-"""Fetch and build the transcription toolchain: apt prerequisites, whisper.cpp, models.
+"""Fetch and build the transcription toolchain: system packages (apt/dnf/pacman), engines, models.
 
 Shared by `rambler setup` and the GUI's first-run dialog. Nothing here needs root except the optional
-apt step, which goes through pkexec (GUI) or sudo (CLI).
+package step, which goes through pkexec (GUI) or sudo (CLI).
 """
 from __future__ import annotations
 
@@ -70,32 +70,58 @@ def default_backend() -> str:
     return "faster-whisper"          # CPU, int8
 
 
+# What Rambler needs, by package manager. Debian/Ubuntu/Pop, Fedora and Arch (and their derivatives).
+PACKAGES = {
+    "apt":    {"ffmpeg": ["ffmpeg"], "git": ["git"], "cmake": ["cmake"], "cxx": ["build-essential"],
+               "xcb-cursor": ["libxcb-cursor0"], "vulkan": ["libvulkan-dev", "glslc"]},
+    "dnf":    {"ffmpeg": ["ffmpeg-free"], "git": ["git"], "cmake": ["cmake"], "cxx": ["gcc-c++", "make"],
+               "xcb-cursor": ["xcb-util-cursor"], "vulkan": ["vulkan-loader-devel", "glslc"]},
+    "pacman": {"ffmpeg": ["ffmpeg"], "git": ["git"], "cmake": ["cmake"], "cxx": ["base-devel"],
+               "xcb-cursor": ["xcb-util-cursor"], "vulkan": ["vulkan-icd-loader", "vulkan-headers", "shaderc"]},
+}
+
+
+def package_manager() -> str | None:
+    for pm, exe in (("apt", "apt-get"), ("dnf", "dnf"), ("pacman", "pacman")):
+        if shutil.which(exe):
+            return pm
+    return None
+
+
 def cuda_toolkit_package() -> str:
+    pm = package_manager()
+    if pm == "pacman":
+        return "cuda"
+    if pm == "dnf":
+        return "cuda"          # from NVIDIA's repo; Fedora doesn't ship it
     return "system76-cuda-latest" if is_pop_os() else "nvidia-cuda-toolkit"
 
 
-def _dpkg_installed(pkg: str) -> bool:
-    r = subprocess.run(["dpkg-query", "-W", "-f=${Status}", pkg], capture_output=True, text=True)
-    return "install ok installed" in r.stdout
+def _installed(pm: str, pkg: str) -> bool:
+    cmd = {"apt": ["dpkg-query", "-W", "-f=${Status}", pkg], "dnf": ["rpm", "-q", pkg],
+           "pacman": ["pacman", "-Q", pkg]}[pm]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "install ok installed" in r.stdout if pm == "apt" else r.returncode == 0
 
 
 def missing_packages(backend: str) -> list[str]:
-    """apt packages needed for this backend and to run Rambler."""
-    need = {"ffmpeg": "ffmpeg"} if backend == "faster-whisper" else \
-        {"git": "git", "cmake": "cmake", "g++": "build-essential", "ffmpeg": "ffmpeg"}
-    missing = [pkg for exe, pkg in need.items() if not shutil.which(exe)]
-    if not shutil.which("dpkg-query"):
-        return missing
-    if not _dpkg_installed("libxcb-cursor0"):
-        missing.append("libxcb-cursor0")
+    """System packages needed for this backend and to run Rambler, named for this distro's package manager."""
+    pm = package_manager()
+    need = ["ffmpeg"] if backend == "faster-whisper" else ["git", "cmake", "cxx", "ffmpeg"]
+    probe = {"ffmpeg": "ffmpeg", "git": "git", "cmake": "cmake", "cxx": "g++"}
+    if pm is None:
+        return [probe[n] for n in need if not shutil.which(probe[n])]
+    names = PACKAGES[pm]
+    missing = [p for n in need if not shutil.which(probe[n]) for p in names[n]]
+    missing += [p for p in names["xcb-cursor"] if not _installed(pm, p)]
     if backend == "cuda" and not find_nvcc():
         missing.append(cuda_toolkit_package())
     if backend == "vulkan":
-        if not _dpkg_installed("libvulkan-dev"):
-            missing.append("libvulkan-dev")
-        if not shutil.which("glslc"):
-            missing.append("glslc")
-    return missing
+        missing += [p for p in names["vulkan"] if not _installed(pm, p)]
+    return list(dict.fromkeys(missing))
 
 
 @dataclass
@@ -139,11 +165,23 @@ def _run(cmd: list[str], log: Log, cancel: threading.Event, on_line: Callable[[s
         raise SetupError(f"{cmd[0]} failed ({proc.returncode}):\n" + "\n".join(tail[-15:]))
 
 
+def install_command(pkgs: list[str]) -> str:
+    pm = package_manager()
+    if pm == "dnf":
+        return "dnf install -y " + " ".join(pkgs)
+    if pm == "pacman":
+        return "pacman -S --needed --noconfirm " + " ".join(pkgs)
+    return "export DEBIAN_FRONTEND=noninteractive; apt-get update -q && apt-get install -y " + " ".join(pkgs)
+
+
 def install_packages(pkgs: list[str], log: Log, cancel: threading.Event, gui: bool) -> None:
-    """One privilege prompt: apt-get update + install. Failure is fatal only if build tools are still missing."""
+    """One privilege prompt to install everything. Failure is fatal only if needed tools are still missing."""
     if not pkgs:
         return
-    script = "export DEBIAN_FRONTEND=noninteractive; apt-get update -q && apt-get install -y " + " ".join(pkgs)
+    if package_manager() is None:
+        raise SetupError("Couldn't find apt, dnf or pacman. Install these yourself, then run setup again: "
+                         + " ".join(pkgs))
+    script = install_command(pkgs)
     if os.geteuid() == 0:
         cmd = ["sh", "-c", script]
     elif gui and shutil.which("pkexec"):

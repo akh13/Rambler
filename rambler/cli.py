@@ -332,7 +332,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--backend", choices=["faster-whisper", "cuda", "vulkan", "cpu"],
                    help="faster-whisper (pip, default on NVIDIA) or a whisper.cpp build: cuda, vulkan, cpu")
     s.add_argument("--models", help="comma-separated, default: large-v3-turbo,large-v3")
-    s.add_argument("--no-apt", action="store_true", help="don't install system packages")
+    s.add_argument("--no-packages", "--no-apt", dest="no_apt", action="store_true",
+                   help="don't install system packages (apt/dnf/pacman)")
     s.add_argument("--ref", default="", help="whisper.cpp tag/commit to pin")
     s.add_argument("--force", action="store_true")
     s = sub.add_parser("import", help="import from any connected recorder, transcribe, sync, unmount")

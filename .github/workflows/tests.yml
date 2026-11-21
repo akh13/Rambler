@@ -12,3 +12,27 @@ jobs:
       - run: pip install . pytest
       - run: python -m pytest -q tests
       - run: QT_QPA_PLATFORM=offscreen QT_AUDIO_BACKEND=alsa python tests/gui_smoke.py /tmp
+
+  # Fresh-machine installs: install.sh, engine setup through the distro's package manager,
+  # then a real transcription, sync and search.
+  install-ubuntu:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/install_e2e.sh
+
+  install-fedora:
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - run: dnf install -y python3 git tar
+      - uses: actions/checkout@v4
+      - run: tests/install_e2e.sh
+
+  install-arch:
+    runs-on: ubuntu-24.04
+    container: archlinux:latest
+    steps:
+      - run: pacman -Syu --noconfirm python git
+      - uses: actions/checkout@v4
+      - run: tests/install_e2e.sh

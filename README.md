@@ -20,31 +20,67 @@ Everything runs locally on your own GPU. Nothing is uploaded anywhere.
 
 ## Install
 
+Works on Ubuntu, Pop!_OS, Debian, Fedora and Arch (and their derivatives) with Python 3.10 or newer.
+An NVIDIA GPU makes it fast; AMD/Intel GPUs and plain CPUs work too, just slower.
+
 ```bash
 git clone https://github.com/akh13/Rambler.git && cd Rambler
 ./install.sh
 ```
 
-That's it. `install.sh` makes a venv, puts `rambler` on your PATH, adds a launcher entry, then runs
-`rambler setup`, which:
+`install.sh` puts Rambler in its own Python environment under `~/.local/share/rambler/`, adds `rambler` to your
+PATH and Rambler to your app launcher, then runs `rambler setup`, which:
 
-1. installs whatever system packages are missing in one `sudo` prompt (git, cmake, build-essential, ffmpeg,
-   libxcb-cursor0, plus the CUDA toolkit if you have an NVIDIA GPU and no `nvcc`; on Pop!_OS that's
-   `system76-cuda-latest`, elsewhere `nvidia-cuda-toolkit`)
-2. clones and builds whisper.cpp for your GPU (CUDA, Vulkan or CPU)
-3. downloads large-v3, large-v3-turbo and the Silero VAD model from Hugging Face (resumable)
+1. installs any missing system packages (ffmpeg and a Qt library, plus build tools if it needs to compile)
+   through apt, dnf or pacman, asking for your password once
+2. sets up the transcription engine:
+   - **NVIDIA:** [faster-whisper](https://github.com/SYSTRAN/faster-whisper) with NVIDIA's CUDA libraries from
+     pip. Nothing to compile and no CUDA toolkit needed, just the normal NVIDIA driver.
+   - **AMD/Intel or no GPU:** builds [whisper.cpp](https://github.com/ggml-org/whisper.cpp) (Vulkan or CPU).
+3. downloads the Whisper models (large-v3 and large-v3-turbo, about 4.7 GB; resumable if interrupted)
 
-Everything lands in `~/.local/share/rambler/`. Nothing goes in the repo. If you skip it, the app offers the same
-thing on first launch (with a progress window), and Settings → Transcription → Set up engine runs it any time.
+The first run takes 10–20 minutes, mostly downloading. If you skip it, Rambler offers the same setup on first
+launch with a progress window, and Settings → Transcription → *Set up engine* runs it any time.
 
 ```bash
-SKIP_ENGINE=1 ./install.sh                          # app only
-rambler setup --backend vulkan                      # no CUDA toolkit wanted
-rambler setup --models large-v3-turbo --no-apt      # pick models, don't touch apt
-rambler setup --ref v1.8.2 --force                  # pin/rebuild a specific whisper.cpp
+SKIP_ENGINE=1 ./install.sh                              # app only, set up the engine later
+rambler setup --models large-v3-turbo                   # just the faster, smaller model
+rambler setup --backend vulkan                          # AMD/Intel GPU
+rambler setup --backend cpu --models small              # no GPU: pick a small model
+rambler setup --no-packages                             # don't touch the system package manager
 ```
 
+**Updating:** `cd Rambler && git pull && SKIP_ENGINE=1 ./install.sh`
+
+**Uninstalling:** delete `~/.local/share/rambler`, `~/.config/rambler`, `~/.cache/rambler`,
+`~/.local/bin/rambler` and `~/.local/share/applications/io.github.akh13.Rambler.desktop`. Your recordings and
+transcripts are never touched.
+
 Settings live in `~/.config/rambler/config.json`.
+
+## Troubleshooting
+
+**Rambler won't start: "Could not load the Qt platform plugin xcb".** The Qt cursor library is missing.
+Ubuntu/Debian: `sudo apt install libxcb-cursor0` · Fedora: `sudo dnf install xcb-util-cursor` ·
+Arch: `sudo pacman -S xcb-util-cursor`.
+
+**Transcription is very slow on an NVIDIA machine.** Check the driver first: `nvidia-smi` should list your GPU.
+If it doesn't, install your distro's proprietary NVIDIA driver and reboot (the CUDA toolkit is *not* needed).
+If the driver is fine, `rambler setup --force` reinstalls the CUDA libraries Rambler uses.
+
+**"Out of memory" or very slow transcription on a smaller GPU.** Lower the batch size in Settings →
+Transcription (it also halves itself automatically), or switch the model to large-v3-turbo.
+
+**My recorder or card doesn't show up.** Put the recorder in its USB drive / card reader mode and run
+`rambler recorders`. It lists every removable volume it can see and which recorder it matches. If your card
+shows with a different label, add it in Settings → Recorders → *Add from connected card*. Rambler mounts
+cards itself if your desktop doesn't, so you don't need to open a file manager first.
+
+**A transcript says "Too short".** Clips under 2 seconds (accidental presses) are skipped on purpose. Whisper
+only invents text for them.
+
+**Something else.** Open the *Log* panel at the bottom of the window; it records every step and error. When
+opening an issue, include the output of `rambler status` and `rambler recorders`.
 
 ## How it works
 

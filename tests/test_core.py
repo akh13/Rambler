@@ -420,3 +420,26 @@ def test_shaky_rule():
         long[i].p = 0.3
     assert Segment(0, 74, "x", long, -0.15).shaky
     assert Segment(0, 1, "x", [], -0.9).shaky and not Segment(0, 1, "x", [], -0.3).shaky
+
+
+def test_package_names_per_distro(monkeypatch):
+    from rambler import setup_engine as se
+    monkeypatch.setattr(se.shutil, "which", lambda exe: None if exe in ("ffmpeg", "g++") else "/usr/bin/" + exe)
+    monkeypatch.setattr(se, "_installed", lambda pm, pkg: False)
+    monkeypatch.setattr(se, "find_nvcc", lambda: None)
+    monkeypatch.setattr(se, "is_pop_os", lambda: True)
+    expect = {
+        "apt": (["ffmpeg", "libxcb-cursor0"], ["build-essential", "ffmpeg", "libxcb-cursor0", "libvulkan-dev", "glslc"],
+                "apt-get install -y"),
+        "dnf": (["ffmpeg-free", "xcb-util-cursor"], ["gcc-c++", "make", "ffmpeg-free", "xcb-util-cursor",
+                                                     "vulkan-loader-devel", "glslc"], "dnf install -y"),
+        "pacman": (["ffmpeg", "xcb-util-cursor"], ["base-devel", "ffmpeg", "xcb-util-cursor", "vulkan-icd-loader",
+                                                   "vulkan-headers", "shaderc"], "pacman -S --needed --noconfirm"),
+    }
+    for pm, (fw, vk, cmd) in expect.items():
+        monkeypatch.setattr(se, "package_manager", lambda pm=pm: pm)
+        assert se.missing_packages("faster-whisper") == fw, pm
+        assert se.missing_packages("vulkan") == vk, pm
+        assert cmd in se.install_command(["x"])
+    monkeypatch.setattr(se, "package_manager", lambda: "apt")
+    assert se.missing_packages("cuda")[-1] == "system76-cuda-latest"
