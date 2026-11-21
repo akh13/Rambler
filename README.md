@@ -101,9 +101,35 @@ available model first.
 recording folder (optionally a subfolder such as `Inbox`), then transcribed (+SRT) into the transcript folder
 and synced to every other drive.
 
-**Player.** Select a recording to load it; double-click to play. Subtitles show over the black screen like VLC,
-and the cue list underneath jumps to any line. Space = play/pause, ←/→ = 5 s. Right-click → Open in VLC if
-you want the real thing.
+**Player.** Select a recording to load it; double-click to play. The recording's waveform sits behind the
+subtitles (click anywhere on it to jump there), with level bars that move with the sound. Subtitles light up
+word by word when the transcript has word timings. Space = play/pause, ←/→ = 5 s. Right-click a recording →
+Open in VLC if you want the real thing.
+
+**Search.** The *Search transcripts* tab searches every transcript at once: words, `"exact phrases"`, and the
+last word matches as a prefix. Filter by speaker. Double-click a hit to play from that moment. The index lives
+in `~/.cache/rambler/search.db` and only re-reads transcripts that changed, so it stays quick with thousands of
+recordings. Same thing from a terminal: `rambler search walk by the river`.
+
+![Search, dark mode](docs/search-dark.png)
+
+**Corrections.** Lines Whisper wasn't sure about are shown in orange, and the unsure words are underlined in the
+subtitles. Double-click a line to fix it; the `.txt`, `.srt` and `.json` are rewritten together (word timings
+are kept where the word count matches), the search index updates, and the fix syncs to your other drives on the
+next sync. New names you type in are offered as hotwords so they're spelled right next time.
+
+**Speakers.** Select lines, right-click → *Set speaker*. Speakers show in the transcript, the subtitles, a
+library column, the search filter, and the `.srt` as `[Name] text`.
+
+**Summaries.** If something writes a `<name>.summary` next to a transcript (a local LLM summariser, say), Rambler
+shows it in the library and on the player.
+
+**Light and dark.** Follows the system by default; the toolbar button switches, and Settings → Appearance has
+the rest (waveform, level bars, confidence marks).
+
+**Open WebUI (optional).** Settings → Open WebUI: point it at your server, paste an API key, pick a knowledge
+base. Rambler sends each transcript as a document (summary and speakers on top) and replaces it when you correct
+it, so you can chat with your recordings. `rambler push-owui` does the same headless.
 
 **Automation.** Settings → Automation: transcribe-and-sync when Rambler opens and/or whenever a configured drive
 is plugged in (polled every few seconds), and start Rambler minimized at login so a recorder or drive plugged
@@ -120,6 +146,8 @@ rambler sync --dry-run
 rambler recorders                 # what's plugged in, and which recorder it matches
 rambler import                    # pull from a connected recorder now, transcribe, sync, unmount
 rambler watch                     # stay running and do all of the above whenever a card or drive appears
+rambler search "old house"        # search every transcript
+rambler push-owui                 # send new/changed transcripts to Open WebUI
 ```
 
 Handy in a systemd user timer or a udev-triggered unit.
@@ -136,7 +164,7 @@ python -m rambler                            # run from the source tree
 `tests/fake_whisper_cli.py` mimics whisper-cli, so you can point Settings → whisper-cli at it to try the UI
 without a GPU.
 
-Code map: `config.py` (settings), `recorders.py` (card detection + import), `setup_engine.py` (toolchain), `library.py` (scan + transcript matching), `engines.py` (whisper.cpp,
+Code map: `config.py` (settings), `recorders.py` (card detection + import), `transcript.py` (segments, edits, speakers), `search.py` (FTS index), `peaks.py` (waveforms), `openwebui.py`, `setup_engine.py` (toolchain), `library.py` (scan + transcript matching), `engines.py` (whisper.cpp,
 faster-whisper, model ranking), `pipeline.py` (write outputs, import drops), `syncer.py` (plan + copy),
 `cli.py`, `gui/` (main window, player, settings, background worker).
 

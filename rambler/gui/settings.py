@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
                                QTabWidget, QVBoxLayout, QWidget)
 
 from ..config import Config
+from . import theme
 from ..engines import list_ggml_models, make_engine
 
 LANGS = [("auto", "Auto-detect"), ("en", "English"), ("de", "German"), ("nl", "Dutch"), ("fr", "French"),
@@ -39,7 +40,7 @@ def set_autostart(on: bool) -> None:
 def _help(text: str) -> QLabel:
     lab = QLabel(text)
     lab.setWordWrap(True)
-    lab.setStyleSheet("color: palette(mid); font-size: 11px;")
+    lab.setStyleSheet(f"color: {theme.c('help')}; font-size: 11px;")
     return lab
 
 
@@ -66,7 +67,7 @@ class FolderList(QWidget):
         t = QLabel(f"<b>{title}</b>")
         h = QLabel(hint)
         h.setWordWrap(True)
-        h.setStyleSheet("color: palette(mid);")
+        h.setStyleSheet(f"color: {theme.c('help')};")
         lay.addWidget(t)
         lay.addWidget(h)
         lay.addLayout(row)
@@ -137,9 +138,9 @@ class SettingsDialog(QDialog):
         self.threads.setRange(1, 64)
         self.threads.setValue(cfg.threads)
         self.prompt = QLineEdit(cfg.initial_prompt)
-        self.prompt.setPlaceholderText("e.g. A voice journal. Names: Sam, Robyn. Work: Proxmox, Ceph.")
+        self.prompt.setPlaceholderText("e.g. A voice diary. Names: Alex, Jordan. Topics: gardening, Kubernetes.")
         self.hotwords = QLineEdit(cfg.hotwords)
-        self.hotwords.setPlaceholderText("e.g. Robyn, Narre Warren, cephadm, pfSense")
+        self.hotwords.setPlaceholderText("e.g. Jordan, Brighton, Kubernetes, kubectl")
         self.batch = QSpinBox()
         self.batch.setRange(1, 32)
         self.batch.setValue(cfg.fw_batch)
@@ -210,7 +211,7 @@ class SettingsDialog(QDialog):
         self.confirm = QCheckBox("Show the copy plan before syncing")
         self.confirm.setChecked(cfg.confirm_sync_plan)
         note = QLabel("Sync only ever adds or updates files. It never deletes anything.")
-        note.setStyleSheet("color: palette(mid);")
+        note.setStyleSheet(f"color: {theme.c('help')};")
         sf.addRow("", self.sync_audio)
         sf.addRow("", self.sync_trans)
         sf.addRow("When copies differ", self.policy)
@@ -241,7 +242,7 @@ class SettingsDialog(QDialog):
                       "the primary recording folder, then transcribed and synced. Plug the recorder in while "
                       "it's in card reader mode and use \"Add from connected card\" to pin it by UUID.")
         hint.setWordWrap(True)
-        hint.setStyleSheet("color: palette(mid);")
+        hint.setStyleSheet(f"color: {theme.c('help')};")
         rl.addWidget(hint)
         self.rec_data: list[dict] = [dict(r) for r in cfg.recorders]
         self.rec_list = QListWidget()
@@ -299,6 +300,63 @@ class SettingsDialog(QDialog):
         else:
             form_w.setEnabled(False)
         tabs.addTab(rw, "Recorders")
+
+        # Appearance
+        apw = QWidget()
+        apf = QFormLayout(apw)
+        self.theme = QComboBox()
+        self.theme.addItem("Follow the system", "system")
+        self.theme.addItem("Light", "light")
+        self.theme.addItem("Dark", "dark")
+        self.theme.setCurrentIndex(max(0, self.theme.findData(cfg.theme)))
+        self.wave = QCheckBox("Show the recording's waveform behind the subtitles (click it to jump)")
+        self.wave.setChecked(cfg.show_waveform)
+        self.live = QCheckBox("Animate level bars while playing")
+        self.live.setChecked(cfg.live_visualizer)
+        self.conf = QCheckBox("Mark words Whisper wasn't sure about")
+        self.conf.setChecked(cfg.show_confidence)
+        apf.addRow("Theme", self.theme)
+        apf.addRow("", self.wave)
+        apf.addRow("", self.live)
+        apf.addRow("", self.conf)
+        tabs.addTab(apw, "Appearance")
+
+        # Open WebUI
+        ow = QWidget()
+        of = QFormLayout(ow)
+        of.addRow(_help("Optional. Keeps an Open WebUI knowledge base filled with your transcripts so you can chat "
+                        "with them. Each recording becomes one document (summary and speakers on top). Changed "
+                        "transcripts replace their old document."))
+        self.ow_url = QLineEdit(cfg.owui_url)
+        self.ow_url.setPlaceholderText("http://localhost:3000")
+        self.ow_key = QLineEdit(cfg.owui_key)
+        self.ow_key.setEchoMode(QLineEdit.Password)
+        self.ow_key.setPlaceholderText("Open WebUI › Settings › Account › API keys")
+        kb_row = QWidget()
+        kh = QHBoxLayout(kb_row)
+        kh.setContentsMargins(0, 0, 0, 0)
+        self.ow_kb = QComboBox()
+        self.ow_kb.setEditable(True)
+        if cfg.owui_knowledge:
+            self.ow_kb.addItem(cfg.owui_knowledge, cfg.owui_knowledge)
+        fetch = QPushButton("Fetch list")
+        fetch.clicked.connect(self._fetch_kbs)
+        kh.addWidget(self.ow_kb, 1)
+        kh.addWidget(fetch)
+        self.ow_auto = QCheckBox("Send new and corrected transcripts automatically")
+        self.ow_auto.setChecked(cfg.owui_auto)
+        self.ow_status = _help("")
+        send_all = QPushButton("Send everything now")
+        send_all.clicked.connect(lambda: setattr(self, "send_all_owui", True) or self.ow_status.setText(
+            "Will send after you press Save."))
+        self.send_all_owui = False
+        of.addRow("Server", self.ow_url)
+        of.addRow("API key", self.ow_key)
+        of.addRow("Knowledge base", kb_row)
+        of.addRow("", self.ow_auto)
+        of.addRow("", send_all)
+        of.addRow("", self.ow_status)
+        tabs.addTab(ow, "Open WebUI")
 
         self.autostart = QCheckBox("Start Rambler minimized when I log in (so cards and drives are caught)")
         self.autostart.setChecked(autostart_path().exists())
@@ -408,6 +466,26 @@ class SettingsDialog(QDialog):
         h.addWidget(b)
         return w, e
 
+    def _fetch_kbs(self):
+        from ..openwebui import Client, OpenWebUIError
+        url, key = self.ow_url.text().strip(), self.ow_key.text().strip()
+        if not (url and key):
+            self.ow_status.setText("Enter the server address and API key first.")
+            return
+        try:
+            kbs = Client(url, key, timeout=15).knowledge_bases()
+        except OpenWebUIError as e:
+            self.ow_status.setText(str(e))
+            return
+        cur = self.ow_kb.currentData() or self.ow_kb.currentText()
+        self.ow_kb.clear()
+        for kid, name in kbs:
+            self.ow_kb.addItem(f"{name}  ({kid[:8]}…)", kid)
+        i = self.ow_kb.findData(cur)
+        self.ow_kb.setCurrentIndex(max(0, i))
+        self.ow_status.setText(f"{len(kbs)} knowledge base(s) found." if kbs else
+                               "No knowledge bases. Create one in Open WebUI › Workspace › Knowledge.")
+
     def _engine_rows(self):
         """Only show the settings that apply to the engine in use."""
         choice = self.engine.currentData()
@@ -474,6 +552,18 @@ class SettingsDialog(QDialog):
             c.recorders = [dict(d) for d in self.rec_data]
         if hasattr(self, "autostart"):
             c.start_minimized = self.autostart.isChecked()
+        if hasattr(self, "theme"):
+            c.theme = self.theme.currentData()
+            c.show_waveform = self.wave.isChecked()
+            c.live_visualizer = self.live.isChecked()
+            c.show_confidence = self.conf.isChecked()
+        if hasattr(self, "ow_url"):
+            c.owui_url = self.ow_url.text().strip()
+            c.owui_key = self.ow_key.text().strip()
+            kb = self.ow_kb.currentData()
+            text = self.ow_kb.currentText().strip()
+            c.owui_knowledge = kb if kb and (text == self.ow_kb.itemText(self.ow_kb.currentIndex())) else text
+            c.owui_auto = self.ow_auto.isChecked()
         if hasattr(self, "auto_launch"):
             c.auto_on_launch = self.auto_launch.isChecked()
             c.auto_on_drive_connect = self.auto_drive.isChecked()

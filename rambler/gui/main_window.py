@@ -6,13 +6,14 @@ import subprocess
 import time
 from pathlib import Path, PurePosixPath
 
-from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QTimer, QUrl)
+from PySide6.QtCore import (QAbstractTableModel, QModelIndex, QSortFilterProxyModel, Qt, QThread, QTimer, QUrl,
+                            Signal)
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QIcon
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QPlainTextEdit, QProgressBar, QPushButton, QSizePolicy, QSplitter, QStyle, QTableView,
-                               QToolBar, QVBoxLayout, QWidget)
+                               QTabWidget, QToolBar, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import APP_NAME, __version__
 from ..config import Config
@@ -20,16 +21,19 @@ from ..engines import Cancelled, EngineError, make_engine
 from ..library import Recording, scan
 from ..pipeline import expand_drops, import_files, run_post_hook, transcribe_one
 from ..syncer import Plan, build_plan, execute, human
-from .player import PlayerPanel
+from ..search import SearchIndex
+from ..transcript import Transcript, read_summary
+from . import theme
+from .player import PlayerPanel, fmt_time
 from .settings import SettingsDialog, set_autostart
 from .. import recorders as R
 from .workers import JobContext, Worker
 
-COLS = ["Status", "Recording", "Folder", "Size", "Modified", "Copies", "Subtitles"]
+COLS = ["Status", "Recording", "Folder", "Size", "Modified", "Copies", "Subtitles", "Speakers", "Summary"]
 STATUS_COLORS = {
-    "To be transcribed": "#e08a00", "Transcribed (no SRT)": "#3b82c4", "Transcribed": "#2e7d32",
-    "Failed": "#c62828", "Queued": "#7a7a7a", "Too short": "#9e9e9e", "Track (MIX transcribed)": "#6d8f71",
-    "Track (MIX pending)": "#9e9e9e",
+    "To be transcribed": "pending", "Transcribed (no SRT)": "nosrt", "Transcribed": "done",
+    "Failed": "failed", "Queued": "muted", "Too short": "muted", "Track (MIX transcribed)": "muted",
+    "Track (MIX pending)": "muted",
 }
 
 
@@ -39,6 +43,12 @@ class LibraryModel(QAbstractTableModel):
         self.recs: list[Recording] = []
         self.overlay: dict[str, str] = {}      # rel -> transient status (Queued, Transcribing 40%, Failed)
         self.n_audio_dirs = 0
+        self.info: dict[str, tuple[str, str]] = {}   # rel -> (summary, speakers), from the search index
+
+    def set_info(self, info):
+        self.info = info
+        if self.recs:
+            self.dataChanged.emit(self.index(0, 7), self.index(len(self.recs) - 1, 8))
 
     def set_recs(self, recs, n_audio_dirs):
         self.beginResetModel()
@@ -91,18 +101,26 @@ class LibraryModel(QAbstractTableModel):
                 return f"{len(r.locations)}/{self.n_audio_dirs}"
             if c == 6:
                 return r.srt.suffix.lstrip(".").upper() if r.srt else ""
+            if c == 7:
+                return self.info.get(r.rel.as_posix(), ("", ""))[1]
+            if c == 8:
+                return self.info.get(r.rel.as_posix(), ("", ""))[0].replace("\n", " ")
         if role == Qt.UserRole + 1:   # sort keys
+            inf = self.info.get(r.rel.as_posix(), ("", ""))
             return {0: self.status_of(r), 1: r.name.lower(), 2: str(r.rel.parent).lower(), 3: r.size,
-                    4: r.mtime, 5: len(r.locations), 6: bool(r.srt)}[c]
+                    4: r.mtime, 5: len(r.locations), 6: bool(r.srt), 7: inf[1].lower(), 8: inf[0].lower()}[c]
         if role == Qt.ForegroundRole and c == 0:
             s = self.status_of(r)
             key = "Failed" if s.startswith("Failed") else s if s in STATUS_COLORS else None
-            if s.startswith("Transcribing") or s.startswith("Decoding"):
-                return QBrush(QColor("#8e44ad"))
+            if s.startswith("Transcribing") or s.startswith("Decoding") or s.startswith("Loading"):
+                return QBrush(QColor(theme.c("working")))
             if key:
-                return QBrush(QColor(STATUS_COLORS[key]))
+                return QBrush(QColor(theme.c(STATUS_COLORS[key])))
         if role == Qt.ForegroundRole and c == 5 and len(r.locations) < self.n_audio_dirs:
-            return QBrush(QColor("#e08a00"))
+            return QBrush(QColor(theme.c("pending")))
+        if role == Qt.ToolTipRole and c == 8:
+            summ = self.info.get(r.rel.as_posix(), ("", ""))[0]
+            return summ or None
         if role == Qt.ToolTipRole:
             locs = "\n".join(str(l) for l in r.locations)
             return f"{r.rel}\nOn: \n{locs}\nTranscript: {r.txt or '—'}\nSubtitles: {r.srt or '—'}"
@@ -124,8 +142,11 @@ class FilterProxy(QSortFilterProxyModel):
 
     def filterAcceptsRow(self, row, parent):
         r: Recording = self.sourceModel().recs[row]
-        if self.text and self.text not in r.rel.as_posix().lower():
-            return False
+        if self.text:
+            summ, spk = self.sourceModel().info.get(r.rel.as_posix(), ("", ""))
+            if self.text not in r.rel.as_posix().lower() and self.text not in spk.lower() \
+                    and self.text not in summ.lower():
+                return False
         if self.mode == "pending":
             return r.pending
         if self.mode == "nosrt":
@@ -133,6 +154,26 @@ class FilterProxy(QSortFilterProxyModel):
         if self.mode == "missing":
             return len(r.locations) < self.sourceModel().n_audio_dirs
         return True
+
+
+class BgWorker(QThread):
+    """Background task outside the main job queue (search indexing, Open WebUI pushes)."""
+    progress = Signal(int, int)
+    log = Signal(str)
+    result = Signal(object)
+
+    def __init__(self, fn, parent=None):
+        super().__init__(parent)
+        self.fn = fn
+        import threading
+        self.cancel = threading.Event()
+
+    def run(self):
+        try:
+            self.result.emit(self.fn(self))
+        except Exception as e:          # surfaced in the log, never fatal
+            self.log.emit(f"{type(e).__name__}: {e}")
+            self.result.emit(None)
 
 
 class DropOverlay(QLabel):
@@ -192,6 +233,9 @@ class MainWindow(QMainWindow):
         self.engine_label.setContentsMargins(0, 0, 10, 0)
         tb.addWidget(self.engine_label)
         tb.addAction(self.act_setup)
+        self.act_theme = QAction("", self)
+        self.act_theme.triggered.connect(self._toggle_theme)
+        tb.addAction(self.act_theme)
         tb.addAction(self.act_settings)
 
         # ---- drive chips
@@ -217,8 +261,8 @@ class MainWindow(QMainWindow):
         self.table.setWordWrap(False)
         hh = self.table.horizontalHeader()
         hh.setSectionResizeMode(QHeaderView.Interactive)
-        hh.setSectionResizeMode(1, QHeaderView.Stretch)
-        for col, w in ((0, 150), (2, 120), (3, 75), (4, 130), (5, 60), (6, 70)):
+        hh.setSectionResizeMode(8, QHeaderView.Stretch)
+        for col, w in ((0, 150), (1, 200), (2, 70), (3, 75), (4, 125), (5, 55), (6, 65), (7, 110)):
             self.table.setColumnWidth(col, w)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
@@ -226,7 +270,7 @@ class MainWindow(QMainWindow):
         self.table.doubleClicked.connect(lambda i: self._on_current(i, None, autoplay=True))
 
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Filter by name or folder…")
+        self.search.setPlaceholderText("Filter by name, folder, speaker or summary…")
         self.search.setClearButtonEnabled(True)
         self.show_mode = QComboBox()
         for label, mode in (("All recordings", "all"), ("To be transcribed", "pending"),
@@ -246,15 +290,27 @@ class MainWindow(QMainWindow):
         ll.addWidget(self.table, 1)
         ll.addWidget(self.counts)
 
+        self.index = SearchIndex()
+        self._index_job = None
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setDocumentMode(True)
+        self.left_tabs.addTab(lib, "Library")
+        self.left_tabs.addTab(self._build_search_tab(), "Search transcripts")
+
         self.player = PlayerPanel()
         self.player.message.connect(self.log)
+        self.player.edited.connect(self._on_transcript_edited)
+        self.player.speaker_source = self.index.all_speakers
+        self.player.show_confidence = self.cfg.show_confidence
+        self.player.live = self.cfg.live_visualizer
+        self.player.screen.show_wave = self.cfg.show_waveform
         pw = QWidget()
         pl = QVBoxLayout(pw)
         pl.setContentsMargins(4, 4, 8, 4)
         pl.addWidget(self.player)
 
         split = QSplitter(Qt.Horizontal)
-        split.addWidget(lib)
+        split.addWidget(self.left_tabs)
         split.addWidget(pw)
         split.setSizes([760, 560])
 
@@ -319,6 +375,15 @@ class MainWindow(QMainWindow):
         self._handled_recorders: set[str] = set()
         self.chk_srt.toggled.connect(self._srt_toggled)
 
+        self._bg: set = set()
+        self._player_rec = None
+        try:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.styleHints().colorSchemeChanged.connect(self._system_scheme_changed)
+        except (AttributeError, RuntimeError):
+            pass
+        self.apply_theme()
+
         self.drive_timer = QTimer(self)
         self.drive_timer.timeout.connect(self._poll_drives)
         self.drive_timer.start(4000)
@@ -350,6 +415,12 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.cfg, self, first_run=first_run)
         if dlg.exec() == QDialog.Accepted:
             self.cfg = dlg.collect()
+            self.player.show_confidence = self.cfg.show_confidence
+            self.player.live = self.cfg.live_visualizer
+            self.player.screen.show_wave = self.cfg.show_waveform
+            self.apply_theme()
+            if getattr(dlg, "send_all_owui", False):
+                self.push_owui([r for r in self.model.recs if r.txt], force_log=True)
             self.cfg.save()
             try:
                 set_autostart(self.cfg.start_minimized)
@@ -368,7 +439,7 @@ class MainWindow(QMainWindow):
     def _refresh_engine(self):
         ok, msg = make_engine(self.cfg).available()
         self.engine_label.setText(("● " if ok else "⚠ ") + msg)
-        self.engine_label.setStyleSheet("color: #2e7d32;" if ok else "color: #c62828;")
+        self.engine_label.setStyleSheet(f"color: {theme.c('done') if ok else theme.c('failed')};")
         self.engine_label.setToolTip(msg)
         self.act_setup.setVisible(not ok)
         return ok
@@ -406,15 +477,18 @@ class MainWindow(QMainWindow):
                 lab.setToolTip(f"{d}\n{'Connected' if ok else 'Not connected'}{' · primary' if i == 0 else ''}")
                 lab.setStyleSheet(
                     "padding: 2px 8px; border-radius: 9px; " +
-                    ("background: #e3f1e5; color: #1b5e20;" if ok else "background: #eee; color: #888; "
+                    (f"background: {theme.c('chip_ok_bg')}; color: {theme.c('chip_ok_fg')};" if ok else
+                     f"background: {theme.c('chip_off_bg')}; color: {theme.c('chip_off_fg')}; "
                      "text-decoration: line-through;"))
                 self.drive_bar.addWidget(lab)
+        ok_, off, busy, err = (f"background: {theme.c(k + '_bg')}; color: {theme.c(k + '_fg')};"
+                               for k in ("chip_ok", "chip_off", "chip_busy", "chip_err"))
         styles = {
-            "absent": ("", "background: #eee; color: #888;"),
-            "connected": (" · connected", "background: #e3f1e5; color: #1b5e20; font-weight: 600;"),
-            "importing": (" · working…", "background: #e3edf9; color: #0d47a1; font-weight: 600;"),
-            "done": (" · ✓ safe to switch back", "background: #e3f1e5; color: #1b5e20;"),
-            "error": (" · problem, see Log", "background: #fdecea; color: #b71c1c;"),
+            "absent": ("", off),
+            "connected": (" · connected", ok_ + " font-weight: 600;"),
+            "importing": (" · working…", busy + " font-weight: 600;"),
+            "done": (" · ✓ safe to switch back", ok_),
+            "error": (" · problem, see Log", err),
         }
         for rec in R.recorders(self.cfg):
             if not rec.enabled:
@@ -613,6 +687,8 @@ class MainWindow(QMainWindow):
         def done(recs):
             cur = self._current_rec()
             self.model.set_recs(recs, len(self.cfg.audio_roots()))
+            self.model.set_info(self.index.doc_info())
+            QTimer.singleShot(0, self.start_indexing)
             self._update_counts()
             if cur:
                 self._reselect(cur.rel)
@@ -711,6 +787,8 @@ class MainWindow(QMainWindow):
             self.log(msg)
             if failed:
                 self.btn_log.setChecked(True)
+            if ok and self.cfg.owui_auto:
+                self.push_owui([r for r in recs if r.txt])
             self.start_scan(then=lambda _: self._after_transcribe(ok, then, cancelled))
         self.run_job(f"Transcribing {len(recs)} recording(s)" + (" + SRT" if want else ""), job, done)
 
@@ -937,6 +1015,220 @@ class MainWindow(QMainWindow):
             self.start_scan(then=after_scan)
         self.run_job(f"Adding {len(items)} recording(s)", job, imported)
 
+
+    # ================================================================ search
+    def _build_search_tab(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 4, 4, 4)
+        row = QHBoxLayout()
+        self.q = QLineEdit()
+        self.q.setPlaceholderText('Search every transcript…   "exact phrase" works, last word matches as a prefix')
+        self.q.setClearButtonEnabled(True)
+        self.q_speaker = QComboBox()
+        self.q_speaker.addItem("Any speaker", "")
+        self.q_speaker.setMinimumWidth(140)
+        row.addWidget(self.q, 1)
+        row.addWidget(self.q_speaker)
+        lay.addLayout(row)
+        self.results = QTreeWidget()
+        self.results.setRootIsDecorated(False)
+        self.results.setAlternatingRowColors(True)
+        self.results.setHeaderLabels(["Recording", "Time", "Speaker", "Match"])
+        self.results.setColumnWidth(0, 200)
+        self.results.setColumnWidth(1, 60)
+        self.results.setColumnWidth(2, 90)
+        self.results.itemActivated.connect(self._open_hit)
+        self.results.itemDoubleClicked.connect(self._open_hit)
+        lay.addWidget(self.results, 1)
+        self.search_status = QLabel("")
+        lay.addWidget(self.search_status)
+        self._q_timer = QTimer(self)
+        self._q_timer.setSingleShot(True)
+        self._q_timer.setInterval(250)
+        self._q_timer.timeout.connect(self._run_search)
+        self.q.textChanged.connect(lambda: self._q_timer.start())
+        self.q_speaker.currentIndexChanged.connect(self._run_search)
+        return w
+
+    def start_indexing(self):
+        if self._index_job is not None and self._index_job.isRunning():
+            self._index_again = True
+            return
+        self._index_again = False
+        recs = list(self.model.recs)
+        idx = self.index
+
+        def fn(job):
+            return idx.update(recs, lambda d, t: job.progress.emit(d, t), job.cancel)
+        job = BgWorker(fn, self)
+        job.progress.connect(lambda d, t: self.search_status.setText(f"Indexing transcripts… {d}/{t}"))
+        job.log.connect(self.log)
+        job.result.connect(self._indexed)
+        self._index_job = job
+        job.start()
+
+    def _indexed(self, n):
+        self._index_job = None
+        info = self.index.doc_info()
+        self.model.set_info(info)
+        self._refresh_speakers()
+        self.search_status.setText(f"{len(info)} transcripts searchable.")
+        if n:
+            self.log(f"Search index updated ({n} transcript(s)).")
+            if self.q.text().strip() or self.q_speaker.currentData():
+                self._run_search()
+        if getattr(self, "_index_again", False):
+            self.start_indexing()
+
+    def _refresh_speakers(self):
+        cur = self.q_speaker.currentData()
+        self.q_speaker.blockSignals(True)
+        self.q_speaker.clear()
+        self.q_speaker.addItem("Any speaker", "")
+        for sp in self.index.all_speakers():
+            self.q_speaker.addItem(sp, sp)
+        i = self.q_speaker.findData(cur)
+        self.q_speaker.setCurrentIndex(max(0, i))
+        self.q_speaker.blockSignals(False)
+
+    def _run_search(self):
+        q, spk = self.q.text(), self.q_speaker.currentData() or ""
+        self.results.clear()
+        if not q.strip() and not spk:
+            self.search_status.setText(f"{len(self.model.info)} transcripts searchable.")
+            return
+        hits = self.index.search(q, spk)
+        by_rel = {r.rel.as_posix(): r for r in self.model.recs}
+        for h in hits:
+            name = by_rel[h.rel].name if h.rel in by_rel else h.rel
+            it = QTreeWidgetItem([name, fmt_time(int(h.start * 1000)), h.speaker, ""])
+            it.setData(0, Qt.UserRole, (h.rel, h.start))
+            it.setToolTip(0, h.rel)
+            self.results.addTopLevelItem(it)
+            lab = QLabel(h.snippet.replace("\n", " "))
+            lab.setTextFormat(Qt.RichText)
+            lab.setStyleSheet(f"background: transparent; padding-left: 2px; "
+                              f"color: {QApplication.palette().text().color().name()};")
+            self.results.setItemWidget(it, 3, lab)
+        n_rec = len({h.rel for h in hits})
+        more = " (showing the first 500)" if len(hits) >= 500 else ""
+        self.search_status.setText(f"{len(hits)} match(es) in {n_rec} recording(s){more}. "
+                                   "Double-click one to play from there.")
+
+    def _open_hit(self, item, _col=0):
+        rel, start = item.data(0, Qt.UserRole)
+        for row, r in enumerate(self.model.recs):
+            if r.rel.as_posix() == rel:
+                idx = self.proxy.mapFromSource(self.model.index(row, 0))
+                if idx.isValid():
+                    self.table.selectionModel().blockSignals(True)
+                    self.table.setCurrentIndex(idx)
+                    self.table.selectionModel().blockSignals(False)
+                    self.table.scrollTo(idx)
+                if getattr(self, "_player_rec", None) is not r:
+                    self._load_player(r)
+                self.player.seek_seconds(start)
+                return
+
+    # ================================================================ corrections
+    def _on_transcript_edited(self, t, new_words):
+        r = getattr(self, "_player_rec", None)
+        if r is not None:
+            try:
+                self.index.reindex([r])
+            except Exception as e:
+                self.log(f"Search index: {e}")
+            self.model.set_info(self.index.doc_info())
+            self._refresh_speakers()
+        self.statusBar().showMessage("Transcript saved (txt, srt and json). It syncs to your other drives "
+                                     "on the next sync.", 8000)
+        have = {w.strip().lower() for w in self.cfg.hotwords.split(",") if w.strip()}
+        cands = [w for w in dict.fromkeys(new_words) if len(w) > 2 and w.lower() not in have
+                 and any(ch.isalpha() for ch in w)]
+        if cands and self.cfg.engine != "whisper.cpp":
+            self._offer_hotwords(cands)
+        if r is not None and self.cfg.owui_auto:
+            self.push_owui([r])
+
+    def _offer_hotwords(self, words):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Remember these spellings?")
+        lay = QVBoxLayout(dlg)
+        lab = QLabel("Add these to your hotwords so Whisper gets them right next time?")
+        lab.setWordWrap(True)
+        lay.addWidget(lab)
+        boxes = []
+        for w in words[:12]:
+            cb = QCheckBox(w)
+            cb.setChecked(w[:1].isupper())       # names are the usual culprits
+            boxes.append(cb)
+            lay.addWidget(cb)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText("Add")
+        bb.button(QDialogButtonBox.Cancel).setText("Not now")
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        lay.addWidget(bb)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        add = [cb.text() for cb in boxes if cb.isChecked()]
+        if add:
+            cur = [w.strip() for w in self.cfg.hotwords.split(",") if w.strip()]
+            self.cfg.hotwords = ", ".join(cur + add)
+            self.cfg.save()
+            self.log("Added to hotwords: " + ", ".join(add))
+
+    # ================================================================ Open WebUI
+    def push_owui(self, recs, force_log=False):
+        if not (self.cfg.owui_url and self.cfg.owui_key and self.cfg.owui_knowledge):
+            if force_log:
+                QMessageBox.information(self, APP_NAME, "Set up Open WebUI in Settings first.")
+            return
+        from .. import openwebui
+        cfg = self.cfg
+        recs = list(recs)
+
+        def fn(job):
+            return openwebui.push(cfg, recs, job.log.emit, job.cancel)
+        job = BgWorker(fn, self)
+        job.log.connect(self.log)
+
+        def done(res):
+            if res:
+                sent, failed = res
+                if sent or failed or force_log:
+                    self.statusBar().showMessage(f"Open WebUI: {sent} sent" + (f", {failed} failed (see Log)"
+                                                                              if failed else ""), 10000)
+            self._bg.discard(job)
+        job.result.connect(done)
+        self._bg.add(job)
+        job.start()
+
+    # ================================================================ theme
+    def _toggle_theme(self):
+        self.cfg.theme = "light" if theme.is_dark() else "dark"
+        self.cfg.save()
+        self.apply_theme()
+
+    def apply_theme(self):
+        from PySide6.QtWidgets import QApplication
+        theme.apply(QApplication.instance(), self.cfg.theme)
+        dark = theme.is_dark()
+        self.act_theme.setText("☀ Light" if dark else "☾ Dark")
+        self.act_theme.setToolTip("Switch to light mode" if dark else "Switch to dark mode")
+        self._refresh_drive_bar()
+        self._refresh_engine()
+        self.player.restyle()
+        if hasattr(self, "results") and self.results.topLevelItemCount():
+            self._run_search()
+        if self.model.recs:
+            self.model.dataChanged.emit(self.model.index(0, 0), self.model.index(len(self.model.recs) - 1, 0))
+
+    def _system_scheme_changed(self, *_):
+        if self.cfg.theme == "system":
+            self.apply_theme()
+
     # ================================================================ player / selection
     def _current_rec(self) -> Recording | None:
         idx = self.table.currentIndex()
@@ -954,9 +1246,13 @@ class MainWindow(QMainWindow):
                     self.table.selectionModel().blockSignals(False)
                     self.table.scrollTo(idx)
                     # refresh transcript panel if it changed, without interrupting playback of the same file
-                    if self.player.screen.title.text() != str(r.rel) or (r.srt and not self.player.cues):
-                        if self.player.player.playbackState() != QMediaPlayer.PlayingState:
-                            self._load_player(r)
+                    same = self.player.screen.title.text() == str(r.rel)
+                    if same:
+                        self._player_rec = r          # fresh object from the rescan
+                    t = self.player.transcript
+                    stale = (r.srt or r.meta) and not (t and t.timed)
+                    if (not same or stale) and self.player.player.playbackState() != QMediaPlayer.PlayingState:
+                        self._load_player(r, keep_position=same)
                 return
 
     def _on_current(self, cur, prev, autoplay=False):
@@ -964,9 +1260,11 @@ class MainWindow(QMainWindow):
             return
         self._load_player(self.model.recs[self.proxy.mapToSource(cur).row()], autoplay)
 
-    def _load_player(self, r: Recording, autoplay=False):
+    def _load_player(self, r: Recording, autoplay=False, keep_position=False):
         src = next((loc / r.rel for loc in r.locations if (loc / r.rel).exists()), None)
-        self.player.load(src, str(r.rel), r.srt, r.txt, autoplay)
+        summary = self.model.info.get(r.rel.as_posix(), ("", ""))[0] or read_summary(r)
+        self._player_rec = r
+        self.player.load(src, str(r.rel), Transcript.for_recording(r), summary, autoplay, keep_position)
 
     def _context_menu(self, pos):
         r = self._current_rec()
@@ -980,6 +1278,8 @@ class MainWindow(QMainWindow):
         m.addAction("Open containing folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(r.source.parent))))
         if r.txt:
             m.addAction("Open transcript", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(r.txt))))
+        if self.cfg.owui_url and self.cfg.owui_knowledge:
+            m.addAction("Send to Open WebUI", lambda: self.push_owui(self.selected(), force_log=True))
         if r.srt and shutil.which("vlc"):
             m.addAction("Open in VLC", lambda: subprocess.Popen(["vlc", str(r.source), "--sub-file", str(r.srt)]))
         m.exec(self.table.viewport().mapToGlobal(pos))
@@ -991,4 +1291,8 @@ class MainWindow(QMainWindow):
                 return
             self.worker.cancel()
             self.worker.wait(10000)
+        for job in [self._index_job, *self._bg]:
+            if job is not None and job.isRunning():
+                job.cancel.set()
+                job.wait(5000)
         e.accept()

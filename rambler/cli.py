@@ -243,6 +243,36 @@ def cmd_recorders(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_search(cfg: Config, args) -> int:
+    import re as _re
+    from .library import scan
+    from .search import SearchIndex
+    idx = SearchIndex()
+    n = idx.update(scan(cfg), lambda d, t: print(f"\rIndexing {d}/{t}", end="", flush=True))
+    if n:
+        print()
+    hits = idx.search(" ".join(args.query), args.speaker or "", args.limit)
+    for h in hits:
+        m, sec = divmod(int(h.start), 60)
+        hh, m = divmod(m, 60)
+        stamp = f"{hh}:{m:02d}:{sec:02d}" if hh else f"{m}:{sec:02d}"
+        text = _re.sub(r"</?b>", "", h.snippet)
+        print(f"{h.rel}  {stamp}  {('[' + h.speaker + '] ') if h.speaker else ''}{text}")
+    print(f"{len(hits)} match(es)")
+    return 0 if hits else 1
+
+
+def cmd_push_owui(cfg: Config, args) -> int:
+    from . import openwebui
+    from .library import scan
+    if not (cfg.owui_url and cfg.owui_key and cfg.owui_knowledge):
+        print("Open WebUI isn't configured (Settings › Open WebUI).", file=sys.stderr)
+        return 2
+    sent, failed = openwebui.push(cfg, [r for r in scan(cfg) if r.txt], print)
+    print(f"{sent} sent, {failed} failed")
+    return 1 if failed else 0
+
+
 def cmd_watch(cfg: Config, args) -> int:
     """Stay running; act when a recorder card or a configured drive appears."""
     import time
@@ -280,7 +310,8 @@ def make_engine_msg(cfg: Config) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] not in ("status", "sync", "transcribe", "setup", "import", "watch", "recorders") and not argv[0].startswith("-"):
+    if argv and argv[0] not in ("status", "sync", "transcribe", "setup", "import", "watch", "recorders",
+                                     "search", "push-owui") and not argv[0].startswith("-"):
         from .gui.app import run          # `rambler file1.mp3 ...` (e.g. "Open with Rambler")
         return run(argv)
     p = argparse.ArgumentParser(prog="rambler", description="Transcribe and sync audio recordings.")
@@ -308,6 +339,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("-n", "--dry-run", action="store_true", help="only list what would be imported")
     s.add_argument("--from", dest="source", help="use this folder as the recorder's card instead of detecting it")
     s.add_argument("--recorder", default="", help="which configured recorder --from refers to (default: first)")
+    s = sub.add_parser("search", help="search every transcript")
+    s.add_argument("query", nargs="*")
+    s.add_argument("--speaker", default="")
+    s.add_argument("--limit", type=int, default=50)
+    sub.add_parser("push-owui", help="send new/changed transcripts to the configured Open WebUI knowledge base")
     sub.add_parser("recorders", help="show detected cards/volumes and which recorder they match")
     s = sub.add_parser("watch", help="run in the background: auto-import recorders, auto-sync drives")
     s.add_argument("--interval", type=float, default=3.0)
@@ -328,6 +364,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_watch(cfg, args)
     if args.cmd == "recorders":
         return cmd_recorders(cfg, args)
+    if args.cmd == "search":
+        return cmd_search(cfg, args)
+    if args.cmd == "push-owui":
+        return cmd_push_owui(cfg, args)
     from .gui.app import run
     return run([], minimized=args.minimized)
 

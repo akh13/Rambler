@@ -273,3 +273,139 @@ def test_automount(monkeypatch):
     # after we unmount it ourselves, leave it alone while it's still plugged in
     R.unmount(R.Mount(R.Path("/media/anna/X8"), "/dev/sdc1", "", "X8", "fuseblk"), lambda m: None)
     assert R.automount(cfg, lambda m: None) == []
+
+
+def _journal_json(path, segs):
+    import json as _j
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_j.dumps({"audio": "x.wav", "model": "large-v3", "duplicates": [], "segments": segs,
+                              "text": " ".join(s["text"] for s in segs)}))
+
+
+def test_transcript_edit_speakers_save(tmp_path):
+    from rambler.transcript import Transcript
+    j = tmp_path / "t" / "261121_0001.json"
+    _journal_json(j, [
+        {"start": 0.0, "end": 2.0, "text": "Hello Jordon here", "logprob": -0.2,
+         "words": [{"w": " Hello", "s": 0.0, "e": 0.5, "p": 0.99}, {"w": " Jordon", "s": 0.5, "e": 1.0, "p": 0.31},
+                   {"w": " here", "s": 1.0, "e": 2.0, "p": 0.97}]},
+        {"start": 2.5, "end": 4.0, "text": "Second line", "logprob": -1.4, "no_speech": 0.01},
+    ])
+    t = Transcript.load(j, None, None)
+    assert t.source == "json" and t.index_at(1.2) == 0 and t.index_at(2.2) == -1 and t.index_at(3) == 1
+    assert [w.w.strip() for w in t.segments[0].uncertain_words] == ["Jordon"] and t.segments[1].shaky
+    assert t.segments[0].word_at(0.7) == 1
+    new = t.edit(0, "Hello Jordan here")
+    assert new == ["Jordan"]
+    w = t.segments[0].words[1]
+    assert w.w.strip() == "Jordan" and w.p == 1.0 and (w.s, w.e) == (0.5, 1.0)   # timing kept, now trusted
+    t.edit(1, "A completely different second line")       # different word count: no words before, still fine
+    t.set_speaker([0], "Jordan")
+    written = t.save()
+    assert {p.suffix for p in written} == {".json", ".srt", ".txt"}
+    t2 = Transcript.load(j, None, None)
+    assert t2.segments[0].speaker == "Jordan" and t2.segments[0].edited and t2.meta["speakers"] == ["Jordan"]
+    assert t2.segments[1].extra == {"no_speech": 0.01}                     # unknown keys survive
+    assert (tmp_path / "t" / "261121_0001.txt").read_text().startswith("Hello Jordan here A completely")
+    srt_text = (tmp_path / "t" / "261121_0001.srt").read_text()
+    assert "[Jordan] Hello Jordan here" in srt_text
+    t3 = Transcript.load(None, tmp_path / "t" / "261121_0001.srt", None)   # SRT-only round trip keeps speaker
+    assert t3.segments[0].speaker == "Jordan" and t3.segments[0].text == "Hello Jordan here"
+
+
+def test_search_index(tmp_path, env):
+    from rambler.search import SearchIndex
+    cfg, a1, a2, t1, t2 = env
+    cfg.transcript_layout = "flat"
+    tone(a1 / "2026" / "261121_0001.wav", 1)
+    tone(a1 / "2026" / "261121_0002.wav", 1)
+    _journal_json(t1 / "261121_0001.json", [{"start": 0, "end": 3, "text": "We fixed the Ceph cluster today",
+                                              "speaker": "Alex"},
+                                             {"start": 5, "end": 9, "text": "Then a walk in Brighton"}])
+    (t1 / "261121_0001.txt").write_text("We fixed the Ceph cluster today Then a walk in Brighton\n")
+    (t1 / "261121_0001.summary").write_text("Cluster repair and a walk.")
+    (t1 / "261121_0002.txt").write_text("plain text only about cephadm\n")
+    recs = scan(cfg)
+    idx = SearchIndex(tmp_path / "s.db")
+    assert idx.update(recs) == 2
+    assert idx.update(recs) == 0                       # unchanged: nothing re-read
+    hits = idx.search("ceph")
+    assert {h.rel for h in hits} == {"2026/261121_0001.wav", "2026/261121_0002.wav"}   # prefix matches cephadm
+    h = [h for h in hits if h.rel.endswith("0001.wav")][0]
+    assert h.start == 0 and "<b>Ceph</b>" in h.snippet and h.speaker == "Alex"
+    assert [x.start for x in idx.search("brighton")] == [5.0]
+    assert idx.search('"walk in brighton"') and not idx.search('"brighton walk"')
+    assert [x.rel for x in idx.search("", speaker="Alex")] == ["2026/261121_0001.wav"]
+    assert idx.doc_info()["2026/261121_0001.wav"] == ("Cluster repair and a walk.", "Alex")
+    assert idx.search('bad "quote') == idx.search("bad quote")   # never throws on odd input
+    (t1 / "261121_0002.txt").unlink()
+    assert idx.update(scan(cfg)) == 0 and {h.rel for h in idx.search("ceph")} == {"2026/261121_0001.wav"}
+
+
+def test_peaks(tmp_path, monkeypatch):
+    from rambler import peaks
+    monkeypatch.setattr(peaks, "CACHE", tmp_path / "peaks")
+    f = tmp_path / "a.wav"
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+                    "sine=frequency=300:duration=2,volume=0.5[a];anullsrc=d=1[b];[a][b]concat=v=0:a=1",
+                    str(f)], check=True)
+    p = peaks.compute(f)
+    assert 70 <= len(p) <= 80                          # 3 s at 25/s
+    assert max(p[:40]) == 255 and max(p[-15:]) == 0    # tone then silence
+    assert peaks.cached(f) == p
+
+
+def test_openwebui_push(tmp_path, env, monkeypatch):
+    import json as _j
+    import threading as _t
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from rambler import openwebui
+    calls = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            body = _j.dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            calls.append(("GET", self.path, self.headers.get("Authorization")))
+            self._send(200, [{"id": "kb-uuid-1", "name": "Journal"}])
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(n)
+            calls.append(("POST", self.path, body))
+            if self.path.startswith("/api/v1/files/"):
+                self._send(200, {"id": f"file-{len([c for c in calls if 'files' in c[1]])}"})
+            else:
+                self._send(200, {"ok": True})
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    _t.Thread(target=srv.serve_forever, daemon=True).start()
+    monkeypatch.setattr(openwebui, "STATE", tmp_path / "owui.json")
+    cfg, a1, a2, t1, t2 = env
+    cfg.transcript_layout = "flat"
+    cfg.owui_url, cfg.owui_key, cfg.owui_knowledge = f"http://127.0.0.1:{srv.server_port}", "sk-test", "kb-uuid-1"
+    tone(a1 / "261121_0001.wav", 1)
+    _journal_json(t1 / "261121_0001.json", [{"start": 0, "end": 2, "text": "Hello there", "speaker": "Alex"}])
+    (t1 / "261121_0001.txt").write_text("Hello there\n")
+    (t1 / "261121_0001.summary").write_text("A greeting.")
+    c = openwebui.Client(cfg.owui_url, cfg.owui_key)
+    assert c.knowledge_bases() == [("kb-uuid-1", "Journal")] and calls[0][2] == "Bearer sk-test"
+    recs = scan(cfg)
+    assert openwebui.push(cfg, recs, log=lambda m: None) == (1, 0)
+    up = [c for c in calls if c[1].startswith("/api/v1/files/")][0][2].decode()
+    assert "Summary: A greeting." in up and "Alex:" in up and "Hello there" in up and 'filename="261121_0001.txt"' in up
+    assert ("POST", "/api/v1/knowledge/kb-uuid-1/file/add", b'{"file_id": "file-1"}') in calls
+    assert openwebui.push(cfg, recs, log=lambda m: None) == (0, 0)          # unchanged: not re-sent
+    (t1 / "261121_0001.summary").write_text("A different greeting.")
+    assert openwebui.push(cfg, scan(cfg), log=lambda m: None) == (1, 0)    # changed: new file, old removed
+    assert ("POST", "/api/v1/knowledge/kb-uuid-1/file/remove", b'{"file_id": "file-1"}') in calls
+    srv.shutdown()

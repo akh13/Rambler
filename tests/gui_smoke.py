@@ -144,4 +144,85 @@ for eng in ("whisper.cpp", "faster-whisper"):
     assert d._tf.isRowVisible(d.extra) == (eng == "whisper.cpp")
     d.grab().save(str(out_dir / f"rambler-6-settings-{eng}.png"))
 d.close()
+
+# ---- word-level JSON, summary, search, corrections, speakers, themes
+import json  # noqa: E402
+import time as _time  # noqa: E402
+
+
+def wait_index(timeout=30):
+    t0 = _time.time()
+    while _time.time() - t0 < timeout:
+        app.processEvents(QEventLoop.AllEvents, 50)
+        if not w.busy() and w._index_job is None:
+            for _ in range(5):
+                app.processEvents()
+            return
+        _time.sleep(0.02)
+    raise SystemExit("index timeout")
+
+
+rec_j = [r for r in w.model.recs if r.name == "261115_0001.wav"][0]
+jpath = rec_j.meta
+words = "Today I walked down to the river with Jordon and we talked about the old house".split()
+segs = []
+t0 = 0.4
+for k in range(0, len(words), 8):
+    chunk = words[k:k + 8]
+    ws = [{"w": " " + x, "s": round(t0 + i * 0.6, 2), "e": round(t0 + (i + 1) * 0.6, 2),
+           "p": 0.32 if x == "Jordon" else 0.97} for i, x in enumerate(chunk)]
+    segs.append({"start": ws[0]["s"], "end": ws[-1]["e"], "text": " ".join(chunk),
+                 "logprob": -0.3, "words": ws})
+    t0 = ws[-1]["e"] + 0.3
+meta = json.loads(jpath.read_text())
+meta["segments"] = segs
+jpath.write_text(json.dumps(meta))
+jpath.with_suffix(".summary").write_text("A walk to the river, thinking about the old house.")
+w.start_scan()
+wait_idle()
+wait_index()
+assert w.model.info["261115_0001.wav"][0].startswith("A walk to the river")
+
+w.left_tabs.setCurrentIndex(1)
+w.q.setText("river")
+w._run_search()
+assert w.results.topLevelItemCount() == 1, w.results.topLevelItemCount()
+w._open_hit(w.results.topLevelItem(0))
+app.processEvents()
+assert w._player_rec.name == "261115_0001.wav" and w.player.transcript.source == "json"
+w.player.player.pause()
+w.player._on_duration(12000)
+w.player._on_position(int((segs[1]["words"][0]["s"] + 0.1) * 1000))   # inside "Jordon"'s line, first word
+app.processEvents()
+sub = w.player.screen.sub.text()
+assert "#8ec5ff" in sub and "underline" in sub, sub                    # current word + unsure "Jordon"
+for mode in ("dark", "light"):
+    w.cfg.theme = mode
+    w.apply_theme()
+    app.processEvents()
+    w.grab().save(str(out_dir / f"rambler-7-search-{mode}.png"))
+
+# correct "Jordon" -> "Jordan", tag a speaker, and check files + index follow
+w.left_tabs.setCurrentIndex(0)
+t = w.player.transcript
+row = next(i for i, sg in enumerate(t.segments) if "Jordon" in sg.text)
+new = t.edit(row, t.segments[row].text.replace("Jordon", "Jordan"))
+assert new == ["Jordan"]
+w.player._apply_speaker([0, row], "Alex")         # saves and emits edited (with no new words)
+app.processEvents()
+assert "Jordan" in (jpath.with_suffix(".txt")).read_text()
+assert "[Alex] " in jpath.with_suffix(".srt").read_text()
+assert w.index.search("jordan") and not w.index.search("jordon")
+assert w.model.info["261115_0001.wav"][1] == "Alex" and "Alex" in w.index.all_speakers()
+w.player._on_position(int((segs[0]["words"][2]["s"] + 0.1) * 1000))
+app.processEvents()
+w.cfg.theme = "dark"
+w.apply_theme()
+app.processEvents()
+w.grab().save(str(out_dir / "rambler-8-player-dark.png"))
+w.cfg.theme = "light"
+w.apply_theme()
+app.processEvents()
+w.grab().save(str(out_dir / "rambler-8-player-light.png"))
+print("search/edit/theme ok")
 w.close()

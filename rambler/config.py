@@ -68,6 +68,17 @@ class Config:
         "unmount_after": True, "enabled": True}])
     start_minimized: bool = False
 
+    theme: str = "system"                # system | light | dark
+    show_waveform: bool = True           # recording's waveform behind the subtitles
+    live_visualizer: bool = True         # moving level bars while playing
+    show_confidence: bool = True         # mark words Whisper wasn't sure about
+
+    # Optional Open WebUI knowledge base to keep in sync with transcripts
+    owui_url: str = ""                   # e.g. http://localhost:3000
+    owui_key: str = ""                   # API key from Open WebUI > Settings > Account
+    owui_knowledge: str = ""             # knowledge base id
+    owui_auto: bool = False              # push after transcribing and after edits
+
     @classmethod
     def load(cls, path: Path = CONFIG_PATH) -> "Config":
         if not path.exists():
@@ -82,7 +93,9 @@ class Config:
     def save(self, path: Path = CONFIG_PATH) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(self), indent=2))
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # may hold an API key
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(asdict(self), indent=2))
         os.replace(tmp, path)
 
     @staticmethod
